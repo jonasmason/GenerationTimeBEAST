@@ -1,0 +1,172 @@
+1) Clone the GenerationTimeBEAST repository
+
+	In PowerShell:
+
+		cd ...\BEAST
+		git clone <GenerationTimeBEAST_repo_url>
+
+	so the repository is now located at:
+
+		...\BEAST\GenerationTimeBEAST_repo
+
+2) Create Eclipse Java project
+
+	In Eclipse:
+
+		File > New > Java Project
+
+	Use the following settings:
+
+		Project name:
+		GenerationTimeBEAST
+
+		Location:
+		...\BEAST\GenerationTimeBEAST_repo
+
+		JRE:
+		zulu17
+
+		Create module-info.java:
+		Unchecked
+
+	then click next.
+
+
+3) Add BEAST project dependencies
+
+	Go to:
+
+		Projects tab
+
+	Click:
+
+		Add...
+
+	Add:
+
+		beast2
+		BeastFX
+
+	These must appear under:
+
+		Classpath, not Modulepath
+
+4) Add local library jars
+
+	Go to:
+
+		Libraries tab
+
+	Under:
+
+		Classpath
+
+	add all jars from:
+
+		GenerationTimeBEAST_repo/lib/
+
+	including:
+
+		commons-math3-3.6.1.jar
+		csparsej.jar
+		(ejml-core-0.44.0.jar)
+		(ejml-ddense-0.44.0.jar)
+		(ejml-dsparse-0.44.0.jar)
+		(ejml-simple-0.44.0.jar)
+
+5) Ensure module system is disabled
+
+	If Eclipse creates:
+
+		src/module-info.java
+
+	-> delete!
+
+	If any dependency appears under:
+
+		Modulepath
+
+	-> move to Classpath
+
+
+6) Clean and build
+
+	Run:
+
+		Project > Clean...
+
+	Expected result:
+
+		0 errors, warnings only
+
+
+7) Configure workflow paths
+
+	Open:
+
+		GenerationTimeBEAST_repo/config/paths.R
+
+	Add a machine-specific block for local machine:
+
+	Example:
+
+  		if (node == "DESKTOP-EBKAL1K") {
+  			repo_dir <- "C:/Users/jonas/OneDrive - ETH Zurich/Desktop/msc_thesis/GenerationTimeBEAST_repo"
+  			output_root <- "D:/BEAST/GenerationTimeBEAST"
+		}
+
+	repo_dir should point to the cloned repository.
+
+	output_root should point to a location where large generated files can be stored (external harddrive in my case).
+
+8) Repository structure
+
+	The repository contains:
+
+	- src/gentime/:
+		Custom Java source code for the BEAST extension.
+
+	- test/gentime/
+		Validation and debugging test classes.
+
+	- lib/
+		Required external jars.
+
+	- scripts/BEAST_GT/
+		RMarkdown workflow scripts.
+
+	- config/
+		Machine-specific path configuration.
+
+	- data/
+		- Small/static tracked data only.
+
+	Large generated outputs are written to:
+
+	<output_root>/<run_name>/
+
+9) Workflow overview
+
+	The recommended workflow order is:
+
+01_simulate_data.Rmd - simulates data
+02_generate_xml.Rmd - creates XML files inside:
+
+<output_root>/<run_name>/xml/
+
+Run the generated XML from Eclipse following the printed instructions from 02_generate_xml.Rmd.
+
+<output_root>/<run_name>/beast_output/
+
+including:
+
+.log
+.trees
+state files
+debugging exports
+snapshot exports
+validation outputs
+
+Then use 09_summarise_beast_posterior.Rmd to summarise posterior, standard MCMC diagnostics.
+
+If the 02 Rmd file was finetuned to have specific debugging or validation steps, it will refer to any of the other .Rmd files which can then be used to interpret/analyses that.

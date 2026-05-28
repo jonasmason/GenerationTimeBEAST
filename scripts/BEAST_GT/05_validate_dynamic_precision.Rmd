@@ -1,0 +1,210 @@
+---
+title: "05 - Validate dynamic snapshot precision matrices"
+author: "Jonas Mason"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+
+source("../../config/paths.R")
+
+experiment_name <- "gt_100taxa_high_signal"
+beast_run_name <- "dynamic_sequence_gt"
+
+paths <- make_run_paths(experiment_name)
+
+sim_data_path <- file.path(
+  paths$sim_data_dir,
+  paste0(experiment_name, "_sim_data.rds")
+)
+
+beast_output_dir <- paths$beast_output_dir
+validation_dir <- paths$validation_dir
+```
+
+
+# Purpose
+
+This validates the dynamic-tree precision snapshots exported by `GenerationTimeGibbsOperatorTest`.
+
+Activate snapshot export in `02_generate_xml.Rmd` with at least one of:
+
+```r
+export_dynamic_snapshots <- TRUE
+validate_dynamic_precision <- TRUE
+validate_dynamic_conditional <- TRUE
+prepare_frozen_tree_validation <- TRUE
+```
+
+
+```{r helpers}
+library(Matrix)
+library(ape)
+
+if (!file.exists(sim_data_path)) {
+  stop("Simulation data not found. Run 01_simulate_data.Rmd first: ", sim_data_path)
+}
+
+sim_data <- readRDS(sim_data_path)
+y <- sim_data$y
+
+list_snapshot_ids <- function(beast_output_dir, prefix_regex = "snapshot") {
+  state_files <- list.files(
+    beast_output_dir,
+    pattern = "_state[.]csv$",
+    full.names = FALSE
+  )
+
+  ids <- sub("_state[.]csv$", "", state_files)
+  ids[grepl(prefix_regex, ids)]
+}
+
+read_snapshot <- function(snapshot_id, beast_output_dir) {
+  snapshot_prefix <- file.path(beast_output_dir, snapshot_id)
+
+  list(
+    tree_edges = read.csv(
+      paste0(snapshot_prefix, "_tree_edges.csv"),
+      stringsAsFactors = FALSE,
+      check.names = FALSE,
+      na.strings = ""
+    ),
+    precision = read.csv(
+      paste0(snapshot_prefix, "_precision_triplets.csv"),
+      stringsAsFactors = FALSE,
+      check.names = FALSE,
+      na.strings = ""
+    ),
+    state = read.csv(
+      paste0(snapshot_prefix, "_state.csv"),
+      stringsAsFactors = FALSE,
+      check.names = FALSE,
+      na.strings = ""
+    )
+  )
+}
+
+truthy <- function(x) {
+  tolower(as.character(x)) == "true"
+}
+```
+
+
+# Precision validation function
+
+```{r precision-validation-function}
+validate_snapshot_precision <- function(snapshot_id, beast_output_dir) {
+
+  snapshot <- read_snapshot(snapshot_id, beast_output_dir)
+
+  tree_edges_snapshot <- snapshot$tree_edges
+  precision_snapshot <- snapshot$precision
+  state_snapshot <- snapshot$state
+
+  n_nodes <- nrow(tree_edges_snapshot)
+
+  Q_beast <- Matrix::sparseMatrix(
+    i = precision_snapshot$row_node_nr + 1,
+    j = precision_snapshot$col_node_nr + 1,
+    x = precision_snapshot$value,
+    dims = c(n_nodes, n_nodes)
+  )
+
+  is_root <- truthy(tree_edges_snapshot$is_root)
+  non_root_edges <- tree_edges_snapshot[!is_root, ]
+
+  rows <- integer(0)
+  cols <- integer(0)
+  vals <- numeric(0)
+
+  for (e in seq_len(nrow(non_root_edges))) {
+
+    child <- non_root_edges$node_nr[e] + 1
+    parent <- non_root_edges$parent_nr[e] + 1
+    branch_length <- non_root_edges$length[e]
+
+    if (branch_length <= 0) {
+      stop("Non-positive branch length in snapshot ", snapshot_id)
+    }
+
+    w <- 1 / branch_length
+
+    rows <- c(rows, child, parent, child, parent)
+    cols <- c(cols, child, parent, parent, child)
+    vals <- c(vals, w, w, -w, -w)
+  }
+
+  Q_rebuilt <- Matrix::sparseMatrix(
+    i = rows,
+    j = cols,
+    x = vals,
+    dims = c(n_nodes, n_nodes)
+  )
+
+  difference <- Q_rebuilt - Q_beast
+
+  root_node_nr <- unique(state_snapshot$root_node_nr)
+  stopifnot(length(root_node_nr) == 1)
+
+  generation_times <- state_snapshot$generation_time[
+    order(state_snapshot$node_nr)
+  ]
+
+  q_beast <- as.numeric(
+    t(generation_times) %*% Q_beast %*% generation_times
+  )
+
+  q_rebuilt <- as.numeric(
+    t(generation_times) %*% Q_rebuilt %*% generation_times
+  )
+
+  data.frame(
+    snapshot_id = snapshot_id,
+    n_nodes = n_nodes,
+    quadratic_form_beast = q_beast,
+    quadratic_form_rebuilt = q_rebuilt,
+    quad_form_abs_difference = abs(q_beast - q_rebuilt),
+    beast_nonzeros = length(Q_beast@x),
+    rebuilt_nonzeros = length(Q_rebuilt@x),
+    same_sparse_pattern = identical(summary(Q_beast)[, 1:2], summary(Q_rebuilt)[, 1:2]),
+    max_abs_difference_Q = max(c(0, abs(difference@x))),
+    root_is_coupled_in_full_Q = sum(Q_beast[root_node_nr + 1, ] != 0) > 0
+  )
+}
+```
+
+# Run validation
+
+```{r run-validation}
+snapshot_ids <- list_snapshot_ids(beast_output_dir)
+
+if (length(snapshot_ids) == 0) {
+  stop("No snapshot files found in ", beast_output_dir)
+}
+
+snapshot_validation_results <- do.call(
+  rbind,
+  lapply(snapshot_ids, validate_snapshot_precision, beast_output_dir = beast_output_dir)
+)
+
+snapshot_validation_summary <- data.frame(
+  n_snapshots = nrow(snapshot_validation_results),
+  all_sparse_patterns_pass = all(snapshot_validation_results$same_sparse_pattern),
+  all_root_coupled_in_full_Q = all(snapshot_validation_results$root_is_coupled_in_full_Q),
+  max_abs_difference_Q = max(snapshot_validation_results$max_abs_difference_Q),
+  max_quad_form_abs_difference = max(snapshot_validation_results$quad_form_abs_difference)
+)
+
+snapshot_validation_results
+snapshot_validation_summary
+```
+Interpretation:
+
+This validation checks whether the precision matrix rebuilt independently in R from exported BEAST tree edges matches the sparse Brownian precision matrix exported directly by BEAST.
+
+- `same_sparse_pattern` checks whether both matrices contain nonzero entries in exactly the same locations.
+- `max_abs_difference_Q` measures the largest absolute entry-wise difference between the matrices.
+- `quad_form_abs_difference` compares quadratic forms [u^T Q u] computed using the BEAST-exported and independently rebuilt precision matrices.
+- `root_is_coupled_in_full_Q` verifies that the root coupling structure is preserved correctly.

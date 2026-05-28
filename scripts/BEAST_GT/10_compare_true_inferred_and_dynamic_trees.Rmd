@@ -1,0 +1,429 @@
+---
+title: "10 - Compare true, inferred, and dynamic posterior trees"
+author: "Jonas Mason"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+
+source("../../config/paths.R")
+
+experiment_name <- "gt_100taxa_high_signal"
+beast_run_name <- "dynamic_sequence_gt"
+
+paths <- make_run_paths(experiment_name)
+
+sim_data_path <- file.path(
+  paths$sim_data_dir,
+  paste0(experiment_name, "_sim_data.rds")
+)
+
+beast_output_dir <- paths$beast_output_dir
+
+workflow_config_path <- file.path(
+  beast_output_dir,
+  paste0("latest_workflow_config_", beast_run_name, ".rds")
+)
+```
+
+# Paths and settings
+
+```{r paths}
+library(ape)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(purrr)
+
+workflow_config_path <- file.path(
+  beast_output_dir,
+  paste0("latest_workflow_config_", run_name, ".rds")
+)
+
+if (!file.exists(workflow_config_path)) {
+  stop("Workflow config not found. Run 02_generate_xml.Rmd first: ", workflow_config_path)
+}
+
+workflow_config <- readRDS(workflow_config_path)
+
+dynamic_log_path <- workflow_config$beast_log_path
+dynamic_trees_path <- workflow_config$beast_tree_path
+
+burnin_samples <- 10000
+max_trees_for_covariance <- 200
+
+if (!file.exists(sim_data_path)) {
+  stop("Simulation data not found: ", sim_data_path)
+}
+if (!file.exists(dynamic_log_path)) {
+  stop("Dynamic BEAST log not found: ", dynamic_log_path)
+}
+if (!file.exists(dynamic_trees_path)) {
+  stop("Dynamic BEAST tree log not found: ", dynamic_trees_path)
+}
+```
+
+# Helper functions
+
+```{r helper-functions}
+normalise_beast_tip_labels <- function(tree) {
+  # BEAST .trees files may encode simulated taxa as numeric labels, e.g. "690".
+  # Convert those back to the simulated labels, e.g. "t690".
+  if (all(grepl("^[0-9]+$", tree$tip.label))) {
+    tree$tip.label <- paste0("t", tree$tip.label)
+  }
+  tree
+}
+
+read_beast_trees_lines <- function(path) {
+  tree_lines <- readLines(path, warn = FALSE)
+  tree_lines <- grep("^\\s*tree\\s+", tree_lines, value = TRUE)
+
+  if (length(tree_lines) == 0) {
+    stop("No tree lines found in: ", path)
+  }
+
+  tree_samples <- as.integer(sub(
+    "^\\s*tree\\s+STATE_([0-9]+).*",
+    "\\1",
+    tree_lines
+  ))
+
+  tree_newicks <- sub("^\\s*tree\\s+[^=]+=", "", tree_lines)
+  tree_newicks <- trimws(tree_newicks)
+  tree_newicks <- sub("^\\[&R\\]\\s*", "", tree_newicks)
+
+  trees <- lapply(tree_newicks, function(x) {
+    normalise_beast_tip_labels(read.tree(text = x))
+  })
+
+  list(
+    samples = tree_samples,
+    trees = trees
+  )
+}
+
+root_height <- function(tree) {
+  max(branching.times(tree))
+}
+
+tree_total_length <- function(tree) {
+  sum(tree$edge.length)
+}
+
+branch_length_summary <- function(tree) {
+  tibble(
+    n_edges = length(tree$edge.length),
+    total_tree_length = tree_total_length(tree),
+    mean_branch_length = mean(tree$edge.length),
+    median_branch_length = median(tree$edge.length),
+    sd_branch_length = sd(tree$edge.length),
+    min_branch_length = min(tree$edge.length),
+    max_branch_length = max(tree$edge.length),
+    root_height = root_height(tree)
+  )
+}
+
+safe_rf_distance <- function(tree_a, tree_b) {
+  common_tips <- intersect(tree_a$tip.label, tree_b$tip.label)
+
+  if (length(common_tips) < 3) {
+    return(NA_real_)
+  }
+
+  a <- keep.tip(tree_a, common_tips)
+  b <- keep.tip(tree_b, common_tips)
+
+  # dist.topo may throw if trees have problematic labels/structure.
+  out <- tryCatch(
+    as.numeric(dist.topo(a, b, method = "PH85")),
+    error = function(e) NA_real_
+  )
+
+  out
+}
+
+covariance_similarity <- function(tree_a, tree_b) {
+  common_tips <- intersect(tree_a$tip.label, tree_b$tip.label)
+
+  if (length(common_tips) < 3) {
+    return(NA_real_)
+  }
+
+  a <- keep.tip(tree_a, common_tips)
+  b <- keep.tip(tree_b, common_tips)
+
+  cov_a <- vcv.phylo(a)
+  cov_b <- vcv.phylo(b)
+
+  cov_b <- cov_b[rownames(cov_a), colnames(cov_a)]
+
+  upper <- upper.tri(cov_a, diag = TRUE)
+
+  cor(
+    as.numeric(cov_a[upper]),
+    as.numeric(cov_b[upper]),
+    use = "complete.obs"
+  )
+}
+```
+
+# Load data
+
+```{r load-data}
+sim_data <- readRDS(sim_data_path)
+true_tree <- sim_data$tree
+true_tree <- normalise_beast_tip_labels(true_tree)
+
+beast_log_raw <- read.delim(
+  dynamic_log_path,
+  comment.char = "#",
+  check.names = FALSE
+)
+
+dynamic_trace <- beast_log_raw %>%
+  filter(Sample > burnin_samples) %>%
+  mutate(
+    residual_regime = if_else(
+      residualVariance < 1.0,
+      "low_residual_variance",
+      "high_residual_variance"
+    )
+  )
+
+beast_trees <- read_beast_trees_lines(dynamic_trees_path)
+posterior_tree_samples <- beast_trees$samples
+posterior_trees <- beast_trees$trees
+
+# Keep post-burn-in posterior trees.
+post_burnin_tree_keep <- posterior_tree_samples > burnin_samples
+posterior_tree_samples <- posterior_tree_samples[post_burnin_tree_keep]
+posterior_trees <- posterior_trees[post_burnin_tree_keep]
+
+final_inferred_tree <- posterior_trees[[length(posterior_trees)]]
+
+cat("Loaded true tree with", length(true_tree$tip.label), "tips.\n")
+cat("Loaded", length(posterior_trees), "post-burn-in dynamic posterior trees.\n")
+cat("Final inferred tree sample:", tail(posterior_tree_samples, 1), "\n")
+```
+
+# Basic true vs final inferred tree comparison
+
+```{r true-vs-final-inferred}
+true_tree_summary <- branch_length_summary(true_tree) %>%
+  mutate(tree = "true_tree")
+
+final_inferred_tree_summary <- branch_length_summary(final_inferred_tree) %>%
+  mutate(tree = "final_inferred_tree")
+
+tree_pair_summary <- bind_rows(
+  true_tree_summary,
+  final_inferred_tree_summary
+) %>%
+  select(tree, everything())
+
+true_vs_final_rf <- safe_rf_distance(true_tree, final_inferred_tree)
+true_vs_final_cov_cor <- covariance_similarity(true_tree, final_inferred_tree)
+
+print(tree_pair_summary, width = Inf)
+
+cat("\nRF distance, true tree vs final inferred tree:", true_vs_final_rf, "\n")
+cat("Brownian covariance correlation, true tree vs final inferred tree:", true_vs_final_cov_cor, "\n")
+```
+
+# Dynamic posterior tree summaries
+
+```{r dynamic-tree-summaries}
+dynamic_tree_summaries <- map2_dfr(
+  posterior_trees,
+  posterior_tree_samples,
+  function(tree, sample_id) {
+    branch_length_summary(tree) %>%
+      mutate(
+        Sample = sample_id,
+        rf_to_true = safe_rf_distance(true_tree, tree),
+        rf_to_final_inferred = safe_rf_distance(final_inferred_tree, tree)
+      )
+  }
+)
+
+dynamic_tree_summaries <- dynamic_tree_summaries %>%
+  left_join(
+    dynamic_trace %>%
+      select(
+        Sample,
+        posterior,
+        beta,
+        brownianVariance,
+        residualVariance,
+        residual_regime,
+        treeHeight
+      ),
+    by = "Sample"
+  )
+
+summary_by_residual_regime <- dynamic_tree_summaries %>%
+  group_by(residual_regime) %>%
+  summarise(
+    n_trees = n(),
+    total_tree_length_mean = mean(total_tree_length, na.rm = TRUE),
+    total_tree_length_sd = sd(total_tree_length, na.rm = TRUE),
+    root_height_mean = mean(root_height, na.rm = TRUE),
+    root_height_sd = sd(root_height, na.rm = TRUE),
+    rf_to_true_mean = mean(rf_to_true, na.rm = TRUE),
+    rf_to_true_sd = sd(rf_to_true, na.rm = TRUE),
+    rf_to_final_inferred_mean = mean(rf_to_final_inferred, na.rm = TRUE),
+    rf_to_final_inferred_sd = sd(rf_to_final_inferred, na.rm = TRUE),
+    brownianVariance_mean = mean(brownianVariance, na.rm = TRUE),
+    residualVariance_mean = mean(residualVariance, na.rm = TRUE),
+    posterior_mean = mean(posterior, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+print(summary_by_residual_regime, width = Inf)
+```
+
+# Tree summaries vs posterior parameters
+
+```{r tree-summary-correlations}
+tree_parameter_correlations <- dynamic_tree_summaries %>%
+  select(
+    posterior,
+    beta,
+    brownianVariance,
+    residualVariance,
+    total_tree_length,
+    root_height,
+    mean_branch_length,
+    median_branch_length,
+    rf_to_true,
+    rf_to_final_inferred
+  ) %>%
+  cor(use = "pairwise.complete.obs")
+
+print(tree_parameter_correlations)
+```
+
+# Covariance similarity to the true tree
+
+```{r covariance-similarity-dynamic}
+set.seed(1)
+
+covariance_tree_indices <- seq_along(posterior_trees)
+
+if (length(covariance_tree_indices) > max_trees_for_covariance) {
+  covariance_tree_indices <- sort(sample(
+    covariance_tree_indices,
+    max_trees_for_covariance
+  ))
+}
+
+covariance_similarity_df <- map_dfr(
+  covariance_tree_indices,
+  function(i) {
+    tibble(
+      Sample = posterior_tree_samples[i],
+      covariance_correlation_to_true = covariance_similarity(
+        true_tree,
+        posterior_trees[[i]]
+      ),
+      covariance_correlation_to_final_inferred = covariance_similarity(
+        final_inferred_tree,
+        posterior_trees[[i]]
+      )
+    )
+  }
+)
+
+covariance_similarity_df <- covariance_similarity_df %>%
+  left_join(
+    dynamic_trace %>%
+      select(
+        Sample,
+        posterior,
+        beta,
+        brownianVariance,
+        residualVariance,
+        residual_regime
+      ),
+    by = "Sample"
+  )
+
+covariance_similarity_summary <- covariance_similarity_df %>%
+  group_by(residual_regime) %>%
+  summarise(
+    n_trees = n(),
+    covariance_correlation_to_true_mean = mean(covariance_correlation_to_true, na.rm = TRUE),
+    covariance_correlation_to_true_sd = sd(covariance_correlation_to_true, na.rm = TRUE),
+    covariance_correlation_to_final_inferred_mean = mean(covariance_correlation_to_final_inferred, na.rm = TRUE),
+    covariance_correlation_to_final_inferred_sd = sd(covariance_correlation_to_final_inferred, na.rm = TRUE),
+    brownianVariance_mean = mean(brownianVariance, na.rm = TRUE),
+    residualVariance_mean = mean(residualVariance, na.rm = TRUE),
+    posterior_mean = mean(posterior, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+print(covariance_similarity_summary, width = Inf)
+
+covariance_parameter_correlations <- covariance_similarity_df %>%
+  select(
+    posterior,
+    brownianVariance,
+    residualVariance,
+    covariance_correlation_to_true,
+    covariance_correlation_to_final_inferred
+  ) %>%
+  cor(use = "pairwise.complete.obs")
+
+print(covariance_parameter_correlations)
+```
+
+# Plots
+
+```{r plots, fig.width=8, fig.height=5}
+ggplot(
+  dynamic_tree_summaries,
+  aes(x = root_height, y = brownianVariance, colour = residual_regime)
+) +
+  geom_point(alpha = 0.5, size = 0.7) +
+  theme_bw() +
+  labs(
+    title = "Brownian variance vs root height across dynamic posterior trees",
+    x = "Root height",
+    y = "Brownian variance",
+    colour = "Residual regime"
+  )
+
+ggplot(
+  dynamic_tree_summaries,
+  aes(x = total_tree_length, y = brownianVariance, colour = residual_regime)
+) +
+  geom_point(alpha = 0.5, size = 0.7) +
+  theme_bw() +
+  labs(
+    title = "Brownian variance vs total tree length across dynamic posterior trees",
+    x = "Total tree length",
+    y = "Brownian variance",
+    colour = "Residual regime"
+  )
+
+ggplot(
+  dynamic_tree_summaries,
+  aes(x = rf_to_true, y = brownianVariance, colour = residual_regime)
+) +
+  geom_point(alpha = 0.5, size = 0.7) +
+  theme_bw() +
+  labs(
+    title = "Brownian variance vs topological distance to true tree",
+    x = "RF distance to true tree",
+    y = "Brownian variance",
+    colour = "Residual regime"
+  )
+```
+
+
+# Interpretation notes
+
+These analyses compare the true simulated tree, the final inferred tree from the dynamic BEAST run, and the set of dynamic posterior trees. We look at the distance between the true and inferred trees, the degree to which dynamic posterior trees differ from the true tree, and whether the low- and high-residual-variance regimes correspond to different tree summaries or different Brownian covariance similarity to the true tree.

@@ -1,0 +1,423 @@
+---
+title: "07 - Generate frozen-tree BEAST XML from snapshot"
+author: "Jonas Mason"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+
+source("../../config/paths.R")
+
+experiment_name <- "gt_100taxa_high_signal"
+beast_run_name <- "dynamic_sequence_gt"
+
+paths <- make_run_paths(experiment_name)
+
+sim_data_path <- file.path(
+  paths$sim_data_dir,
+  paste0(experiment_name, "_sim_data.rds")
+)
+
+beast_output_dir <- paths$beast_output_dir
+xml_dir <- paths$xml_dir
+validation_dir <- paths$validation_dir
+```
+
+
+# Purpose
+
+This file creates a frozen-tree XML from one dynamic snapshot. The resulting BEAST run disables sequence likelihood and tree proposals and only repeats the generation-time Gibbs machinery on that fixed tree.
+
+
+
+Run this after `06_validate_dynamic_conditional_gaussian.Rmd`.
+
+The default chosen snapshot (`freeze_source_snapshot_id <- NULL`) will automatically freeze the dynamic snapshot with the largest Mahalanobis^2 / df. This targets the most inflated dynamic snapshot for the frozen-tree control run.
+
+
+```{r helpers}
+library(Matrix)
+library(ape)
+
+if (!file.exists(sim_data_path)) {
+  stop("Simulation data not found. Run 01_simulate_data.Rmd first: ", sim_data_path)
+}
+
+sim_data <- readRDS(sim_data_path)
+y <- sim_data$y
+
+list_snapshot_ids <- function(beast_output_dir, prefix_regex = "snapshot") {
+  state_files <- list.files(
+    beast_output_dir,
+    pattern = "_state[.]csv$",
+    full.names = FALSE
+  )
+
+  ids <- sub("_state[.]csv$", "", state_files)
+  ids[grepl(prefix_regex, ids)]
+}
+
+read_snapshot <- function(snapshot_id, beast_output_dir) {
+  snapshot_prefix <- file.path(beast_output_dir, snapshot_id)
+
+  list(
+    tree_edges = read.csv(
+      paste0(snapshot_prefix, "_tree_edges.csv"),
+      stringsAsFactors = FALSE,
+      check.names = FALSE,
+      na.strings = ""
+    ),
+    precision = read.csv(
+      paste0(snapshot_prefix, "_precision_triplets.csv"),
+      stringsAsFactors = FALSE,
+      check.names = FALSE,
+      na.strings = ""
+    ),
+    state = read.csv(
+      paste0(snapshot_prefix, "_state.csv"),
+      stringsAsFactors = FALSE,
+      check.names = FALSE,
+      na.strings = ""
+    )
+  )
+}
+
+truthy <- function(x) {
+  tolower(as.character(x)) == "true"
+}
+```
+
+
+# settings
+
+```{r settings}
+freeze_chain_length <- 5000
+freeze_snapshot_frequency <- 100
+
+# If NULL, use the dynamic snapshot with the largest Mahalanobis² / df.
+freeze_source_snapshot_id <- NULL
+```
+
+# Choose source snapshot
+
+```{r choose-snapshot}
+dynamic_results_path <- file.path(
+  validation_dir,
+  paste0("dynamic_conditional_gaussian_results_", beast_run_name, ".rds")
+)
+
+if (is.null(freeze_source_snapshot_id)) {
+  if (!file.exists(dynamic_results_path)) {
+    stop("No dynamic conditional results found. Run 06_validate_dynamic_conditional_gaussian.Rmd first.")
+  }
+
+  dynamic_results <- readRDS(dynamic_results_path)
+
+  freeze_source_snapshot_id <- dynamic_results$snapshot_id[
+    which.max(dynamic_results$mahalanobis2_per_df)
+  ]
+}
+
+cat("Frozen-tree source snapshot:", freeze_source_snapshot_id, "\n")
+```
+
+# Convert snapshot edges to phylo
+
+```{r snapshot-to-phylo}
+snapshot_edges_to_phylo <- function(tree_edges_snapshot) {
+
+  tip_rows <- tree_edges_snapshot[truthy(tree_edges_snapshot$is_leaf), ]
+  internal_rows <- tree_edges_snapshot[!truthy(tree_edges_snapshot$is_leaf), ]
+
+  root_rows <- tree_edges_snapshot[truthy(tree_edges_snapshot$is_root), ]
+
+  tip_node_nrs <- sort(tip_rows$node_nr)
+  root_node_nr <- root_rows$node_nr[1]
+
+  other_internal_node_nrs <- sort(
+    setdiff(internal_rows$node_nr, root_node_nr)
+  )
+
+  internal_node_nrs <- c(root_node_nr, other_internal_node_nrs)
+
+  n_tips <- length(tip_node_nrs)
+  n_internal <- length(internal_node_nrs)
+
+  old_to_new <- setNames(
+    integer(n_tips + n_internal),
+    as.character(c(tip_node_nrs, internal_node_nrs))
+  )
+
+  old_to_new[as.character(tip_node_nrs)] <- seq_len(n_tips)
+
+  old_to_new[as.character(internal_node_nrs)] <-
+    n_tips + seq_len(n_internal)
+
+  edge_rows <- tree_edges_snapshot[!truthy(tree_edges_snapshot$is_root), ]
+
+  edge <- cbind(
+    as.integer(old_to_new[as.character(edge_rows$parent_nr)]),
+    as.integer(old_to_new[as.character(edge_rows$node_nr)])
+  )
+
+  phy <- list(
+    edge = edge,
+    edge.length = as.numeric(edge_rows$length),
+    tip.label = tip_rows$node_id[match(tip_node_nrs, tip_rows$node_nr)],
+    Nnode = n_internal
+  )
+
+  class(phy) <- "phylo"
+
+  ape::reorder.phylo(phy, order = "cladewise")
+}
+```
+
+# Generate frozen XML
+
+```{r generate-frozen-xml}
+snapshot <- read_snapshot(freeze_source_snapshot_id, beast_output_dir)
+
+freeze_tree <- snapshot_edges_to_phylo(snapshot$tree_edges)
+freeze_newick_string <- write.tree(freeze_tree)
+
+state_snapshot <- snapshot$state
+
+n_tips <- length(freeze_tree$tip.label)
+n_nodes <- n_tips + freeze_tree$Nnode
+
+freeze_run_name <- paste0(
+  "freeze_tree_gt_gibbs_from_",
+  sub(".*_snapshot_", "snapshot_", freeze_source_snapshot_id)
+)
+
+freeze_xml_path <- file.path(
+  xml_dir,
+  paste0(experiment_name, "_", freeze_run_name, ".xml")
+)
+
+freeze_log_file <- paste0(experiment_name, "_", freeze_run_name, ".log")
+
+freeze_log_path <- file.path(beast_output_dir, freeze_log_file)
+freeze_console_log_file <- paste0(experiment_name, "_", freeze_run_name, "_console.log")
+freeze_console_log_path <- file.path(beast_output_dir, freeze_console_log_file)
+
+state_ordered <- state_snapshot[order(state_snapshot$node_nr), ]
+generation_time_state_string <- paste(
+  signif(state_ordered$generation_time, 12),
+  collapse = " "
+)
+
+initial_beta_value <- unique(state_snapshot$beta)
+initial_brownian_variance_value <- unique(state_snapshot$brownian_variance)
+initial_residual_variance_value <- unique(state_snapshot$residual_variance)
+
+trait_values_for_xml <- y
+trait_string <- paste(
+  paste0(names(trait_values_for_xml), "=", signif(trait_values_for_xml, 12)),
+  collapse = ","
+)
+
+xml_bool <- function(x) tolower(as.character(isTRUE(x)))
+xml_path <- function(path) normalizePath(path, winslash = "/", mustWork = FALSE)
+
+xml_text <- paste0(
+'<?xml version="1.0" encoding="UTF-8"?>
+
+<beast version="2.7"
+       namespace="beast.base.inference:beast.base.evolution.tree:gentime">
+
+    <run id="mcmc"
+         spec="beast.base.inference.MCMC"
+         chainLength="', freeze_chain_length, '">
+
+        <state id="state">
+
+            <tree id="tree"
+                  name="stateNode"
+                  spec="beast.base.evolution.tree.TreeParser"
+                  newick="', freeze_newick_string, '"
+                  IsLabelledNewick="true"
+                  adjustTipHeights="true"/>
+
+            <parameter id="generationTimes"
+                       name="stateNode"
+                       spec="parameter.RealParameter"
+                       dimension="', n_nodes, '"
+                       value="', generation_time_state_string, '"/>
+
+            <parameter id="brownianVariance"
+                       name="stateNode"
+                       spec="parameter.RealParameter"
+                       dimension="1"
+                       value="', signif(initial_brownian_variance_value, 12), '"
+                       lower="0.0"/>
+
+            <parameter id="beta"
+                       name="stateNode"
+                       spec="parameter.RealParameter"
+                       dimension="1"
+                       value="', signif(initial_beta_value, 12), '"/>
+
+            <parameter id="residualVariance"
+                       name="stateNode"
+                       spec="parameter.RealParameter"
+                       dimension="1"
+                       lower="0.0"
+                       value="', signif(initial_residual_variance_value, 12), '"/>
+
+        </state>
+
+        <distribution id="posterior"
+                      spec="beast.base.inference.CompoundDistribution">
+
+            <distribution id="gtLikelihood"
+                          spec="gentime.GenerationTimeLikelihood"
+                          tree="@tree"
+                          generationTimes="@generationTimes"
+                          beta="@beta"
+                          brownianVariance="@brownianVariance"
+                          residualVariance="@residualVariance"
+                          priorBetaMean="0.0"
+                          priorBetaVariance="1000.0"
+                          scale="raw"
+                          debug="false">
+
+                <traitData id="gtData"
+                           spec="gentime.GenerationTimeTraitData"
+                           tree="@tree"
+                           value="', trait_string, '"
+                           debug="false"/>
+
+                <precisionBuilder id="gtPrecision"
+                                  spec="gentime.GenerationTimePrecisionBuilder"
+                                  tree="@tree"
+                                  debug="false"/>
+
+            </distribution>
+
+            <distribution id="brownianVariancePrior"
+                          spec="gentime.GenerationTimeInverseGammaPrior"
+                          parameter="@brownianVariance"
+                          alpha="2.0"
+                          beta="1.0"/>
+
+            <distribution id="residualVariancePrior"
+                          spec="gentime.GenerationTimeInverseGammaPrior"
+                          parameter="@residualVariance"
+                          alpha="2.0"
+                          beta="1.0"/>
+
+        </distribution>
+
+        <operator id="gtGibbs"
+                  spec="gentime.GenerationTimeGibbsOperatorTest"
+                  tree="@tree"
+                  generationTimes="@generationTimes"
+                  beta="@beta"
+                  brownianVariance="@brownianVariance"
+                  residualVariance="@residualVariance"
+                  traitData="@gtData"
+                  precisionBuilder="@gtPrecision"
+                  gtLikelihood="@gtLikelihood"
+                  priorBetaMean="0.0"
+                  priorBetaVariance="1000.0"
+                  scale="raw"
+                  outputDirectory="', xml_path(beast_output_dir), '"
+                  solver="csparsej"
+                  compareSolvers="false"
+                  maxCgIterations="10000"
+                  cgTolerance="1e-5"
+                  writePosteriorMean="false"
+                  writeLatentPrecisionDiagnostics="false"
+                  profile="false"
+                  profileFrequency="250"
+                  printPrecisionRefresh="true"
+                  snapshotFrequency="', freeze_snapshot_frequency, '"
+                  snapshotPrefix="freeze_', freeze_run_name, '_snapshot"
+                  writeBeta="true"
+                  writeGenerationTimes="true"
+                  debug="false"
+                  weight="0.1"/>
+
+        <operator id="gtVarianceGibbs"
+                  spec="gentime.GenerationTimeVarianceGibbsOperator"
+                  generationTimes="@generationTimes"
+                  brownianVariance="@brownianVariance"
+                  precisionBuilder="@gtPrecision"
+                  gtLikelihood="@gtLikelihood"
+                  tree="@tree"
+                  outputDirectory="', xml_path(beast_output_dir), '"
+                  writeDiagnostics="false"
+                  priorAlpha="2.0"
+                  priorBeta="1.0"
+                  debug="false"
+                  weight="0.1"/>
+
+        <operator id="gtResidualVarianceGibbs"
+                  spec="gentime.GenerationTimeResidualVarianceGibbsOperator"
+                  tree="@tree"
+                  generationTimes="@generationTimes"
+                  beta="@beta"
+                  residualVariance="@residualVariance"
+                  traitData="@gtData"
+                  gtLikelihood="@gtLikelihood"
+                  priorAlpha="2.0"
+                  priorBeta="1.0"
+                  scale="raw"
+                  debug="false"
+                  weight="0.1"/>
+
+        <logger id="screenlog"
+                spec="beast.base.inference.Logger"
+                logEvery="1000">
+            <log idref="posterior"/>
+            <log idref="beta"/>
+            <log idref="brownianVariance"/>
+            <log idref="residualVariance"/>
+        </logger>
+
+        <logger id="filelog"
+                spec="beast.base.inference.Logger"
+                fileName="', freeze_log_file, '"
+                logEvery="1">
+            <log idref="posterior"/>
+            <log idref="beta"/>
+            <log idref="brownianVariance"/>
+            <log idref="residualVariance"/>
+        </logger>
+
+    </run>
+
+</beast>
+'
+)
+
+writeLines(xml_text, freeze_xml_path)
+
+saveRDS(
+  list(
+    freeze_source_snapshot_id = freeze_source_snapshot_id,
+    experiment_name = experiment_name,
+    source_beast_run_name = beast_run_name,
+    freeze_run_name = freeze_run_name,
+    freeze_xml_path = freeze_xml_path,
+    freeze_log_path = freeze_log_path,
+    freeze_console_log_path = freeze_console_log_path
+  ),
+  file.path(beast_output_dir, "freeze_tree_xml_metadata.rds")
+)
+
+cat("\nWrote frozen-tree XML to:\n", freeze_xml_path, "\n")
+cat(
+  "\nRun in Eclipse with:\n\n",
+  "-version_file version.xml -overwrite -working \"",
+  xml_path(freeze_xml_path),
+  "\"\n",
+  sep = ""
+)
+
+cat("\nAfter the frozen BEAST run finishes, open `08_validate_frozen_tree_conditional_gaussian.Rmd`.\n")
+```

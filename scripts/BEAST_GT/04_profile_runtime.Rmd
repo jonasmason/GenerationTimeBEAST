@@ -1,0 +1,220 @@
+---
+title: "04 - Profile runtime from BEAST Gibbs operator console output"
+author: "Jonas Mason"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+
+source("../../config/paths.R")
+
+experiment_name <- "gt_100taxa_high_signal"
+beast_run_name <- "dynamic_sequence_gt"
+
+paths <- make_run_paths(experiment_name)
+
+sim_data_path <- file.path(
+  paths$sim_data_dir,
+  paste0(experiment_name, "_sim_data.rds")
+)
+
+beast_output_dir <- paths$beast_output_dir
+validation_dir <- paths$validation_dir
+
+workflow_config_path <- file.path(
+  beast_output_dir,
+  paste0("latest_workflow_config_", beast_run_name, ".rds")
+)
+```
+
+
+# Purpose
+
+This file summarises runtime profiling printed by `GenerationTimeGibbsOperatorTest`.
+
+To activate profiling, set this in `02_generate_xml.Rmd`:
+
+```r
+profile_gibbs_runtime <- TRUE
+```
+
+The Java test operator then prints repeated profiling blocks during the BEAST run. In the console print-out, blocks starting with:
+
+```text
+GenerationTimeGibbsOperatorTest profile:
+```
+with fields:
+
+- `mean_total_ms`
+- `mean_prior_draw_ms`
+- `mean_rhs_ms`
+- `mean_solver_total_ms`
+- `mean_csparse_update_ms`
+- `mean_csparse_factor_ms`
+- `mean_csparse_solve_ms`
+- `mean_state_write_ms`
+- `precision_topology_refresh_count`
+- `precision_numeric_refresh_count`
+- `mean_precision_topology_refresh_ms`
+- `mean_precision_numeric_refresh_ms`
+
+summarise where runtime is spent, i.e., let us see which steps dominate runtime (precision refreshes, CSparseJ factorisation/solve, state writing, etc.).
+
+To assess systematically across the run, parse the output of the console (saved as a .txt file by BEAST if the run configurations are set up properly, see `02_generate_xml.Rmd`.)
+This Rmd reads that path from the workflow metadata and parses the saved log directly.
+
+
+# Parse profile blocks
+
+```{r parse-profile}
+
+if (!file.exists(workflow_config_path)) {
+  stop(
+    "Workflow config not found: ", workflow_config_path,
+    "\nRun 02_generate_xml.Rmd first."
+  )
+}
+
+if (!isTRUE(workflow_config$profile_gibbs_runtime)) {
+  warning(
+    "The latest workflow config does not have profile_gibbs_runtime = TRUE."
+  )
+}
+
+workflow_config <- readRDS(workflow_config_path)
+console_path <- workflow_config$console_log_path
+
+if (!file.exists(console_path)) {
+  stop(
+    "Saved Eclipse console log not found: ", console_path,
+    "\nIn Eclipse Run Configurations > Common, tick 'File' under Standard Input and Output ",
+    "and set the output file to this path, then rerun BEAST."
+  )
+} else {
+
+  lines <- readLines(console_path, warn = FALSE)
+
+  starts <- grep("GenerationTimeGibbsOperatorTest profile:", lines)
+
+  parse_block <- function(start) {
+
+    block <- lines[start:min(length(lines), start + 25)]
+
+    get_value <- function(name) {
+      hit <- grep(paste0("^\\s*", name, " = "), block, value = TRUE)
+      if (length(hit) == 0) return(NA_real_)
+      as.numeric(sub(".* = ", "", hit[1]))
+    }
+
+    data.frame(
+      proposals = get_value("proposals"),
+      mean_total_ms = get_value("mean_total_ms"),
+      mean_posterior_mean_ms = get_value("mean_posterior_mean_ms"),
+      mean_prior_draw_ms = get_value("mean_prior_draw_ms"),
+      mean_rhs_ms = get_value("mean_rhs_ms"),
+      mean_solver_total_ms = get_value("mean_solver_total_ms"),
+      mean_csparse_update_ms = get_value("mean_csparse_update_ms"),
+      mean_csparse_factor_ms = get_value("mean_csparse_factor_ms"),
+      mean_csparse_solve_ms = get_value("mean_csparse_solve_ms"),
+      mean_combine_ms = get_value("mean_combine_ms"),
+      mean_state_write_ms = get_value("mean_state_write_ms"),
+      mean_debug_ms = get_value("mean_debug_ms"),
+      precision_topology_refresh_count = get_value("precision_topology_refresh_count"),
+      precision_numeric_refresh_count = get_value("precision_numeric_refresh_count"),
+      mean_precision_topology_refresh_ms = get_value("mean_precision_topology_refresh_ms"),
+      mean_precision_numeric_refresh_ms = get_value("mean_precision_numeric_refresh_ms"),
+      last_precision_refresh_ms = get_value("last_precision_refresh_ms")
+    )
+  }
+
+  profile <- do.call(rbind, lapply(starts, parse_block))
+
+  print(profile)
+  
+ 
+  latest <- tail(profile, 1)
+
+  n_gibbs_calls <- latest$proposals
+
+  runtime_components <- data.frame(
+    component = c(
+      "posterior_mean",
+      "prior_draw",
+      "rhs_construction",
+      "solver_total",
+      "csparse_update",
+      "csparse_factor",
+      "csparse_solve",
+      "combine_draw",
+      "state_write",
+      "debug"
+    ),
+    n_calls = n_gibbs_calls,
+    mean_ms_per_call = as.numeric(c(
+      latest$mean_posterior_mean_ms,
+      latest$mean_prior_draw_ms,
+      latest$mean_rhs_ms,
+      latest$mean_solver_total_ms,
+      latest$mean_csparse_update_ms,
+      latest$mean_csparse_factor_ms,
+      latest$mean_csparse_solve_ms,
+      latest$mean_combine_ms,
+      latest$mean_state_write_ms,
+      latest$mean_debug_ms
+    ))
+  )
+
+  refresh_components <- data.frame(
+    component = c(
+      "precision_topology_refresh",
+      "precision_numeric_refresh"
+    ),
+    n_calls = as.numeric(c(
+      latest$precision_topology_refresh_count,
+      latest$precision_numeric_refresh_count
+    )),
+    mean_ms_per_call = as.numeric(c(
+      latest$mean_precision_topology_refresh_ms,
+      latest$mean_precision_numeric_refresh_ms
+    ))
+  )
+
+  runtime_summary <- rbind(
+    runtime_components,
+    refresh_components
+  )
+
+  runtime_summary$absolute_time_ms <-
+    runtime_summary$n_calls * runtime_summary$mean_ms_per_call
+
+  runtime_summary$proportion_of_total_profiled_time <-
+    runtime_summary$absolute_time_ms /
+    sum(runtime_summary$absolute_time_ms)
+
+  runtime_summary <- runtime_summary[
+    order(runtime_summary$absolute_time_ms, decreasing = TRUE),
+  ]
+
+  print(runtime_summary)
+
+}
+```
+Interpretation:
+
+This table uses the final profiling point, which contains cumulative timing information across the run.
+
+For each component:
+
+- `n_calls` is the number of times that component was called up across the entire run.
+- `mean_ms_per_call` is the average time spent per call of that component.
+- `absolute_time_ms` is the cumulative time spent in that component across the entire run.
+- `proportion_of_total_profiled_time` is the fraction of the entire runtime taken up by that component.
+
+For ordinary Gibbs-update components, `n_calls` equals the number of profiled Gibbs proposals. For precision refresh components, `n_calls` is the number of topology or numeric precision refreshes, respectively.
+
+  Important caveat:
+
+The precision-refresh timings are measured inside `GenerationTimePrecisionBuilder.refreshFromTreeIfNeeded()` only. They therefore describe the cost of rebuilding or updating the shared Brownian precision object itself, and do not include Gibbs-operator-side work triggered after a topology change like rebuilding latent-node bookkeeping or rerunning CSparseJ symbolic analysis. They also don't include CSparseJ numeric factorisation, which is reported separately as `csparse_factor`. This means that `mean_precision_topology_refresh_ms` and `mean_precision_numeric_refresh_ms` should not be interpreted as the full inclusive cost of topology-changing versus branch-length-only proposals, only as the precision-builder portion of those updates. 
+Overall I'm quite happy with runtime at this point. If we at some point want to improve further, we can look at more proper profiling that tracks complete end-to-end proposal-update pathways, fully separating where runtime is spent during different types of dynamic-tree updates.

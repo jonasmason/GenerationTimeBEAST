@@ -1,0 +1,206 @@
+---
+title: "03 - Validate CSparseJ solver against internal sparse Cholesky & PCG solvers"
+author: "Jonas Mason"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+
+source("../../config/paths.R")
+
+experiment_name <- "gt_100taxa_high_signal"
+beast_run_name <- "dynamic_sequence_gt"
+
+paths <- make_run_paths(experiment_name)
+
+sim_data_path <- file.path(
+  paths$sim_data_dir,
+  paste0(experiment_name, "_sim_data.rds")
+)
+
+beast_output_dir <- paths$beast_output_dir
+validation_dir <- paths$validation_dir
+
+workflow_config_path <- file.path(
+  beast_output_dir,
+  paste0("latest_workflow_config_", beast_run_name, ".rds")
+)
+```
+
+
+# Purpose
+
+This file summarises the CSparseJ correctness check.
+
+To activate the check, set this in `02_generate_xml.Rmd`:
+
+```r
+validate_csparsej_solver <- TRUE
+```
+
+That forces the XML to call `gentime.GenerationTimeGibbsOperatorTest` and sets:
+
+```xml
+compareSolvers="true"
+solver="csparsej"
+```
+
+The Java test operator then compares CSparseJ solutions against the internal sparse Cholesky reference solver during the BEAST run.
+
+# In the console print-out, lines:
+
+```text
+CSparseJ validation: max_abs_difference_vs_internal_sparse_cholesky = ...
+```
+with the fields:
+
+- `max_abs_difference_vs_internal_sparse_cholesky`
+- `csparsej_residual_norm`
+- `csparsej_cholesky_nonzeros`
+
+indicate differences between the solvers. A good result should have very small max absolute differences.
+
+To assess these differences more systematically across the run, parse the output of the console (saved as a .txt file by BEAST if the run configurations are set up properly, see `02_generate_xml.Rmd`.)
+This Rmd reads that path from the workflow metadata and parses the saved log directly.
+
+
+```{r parse-console}
+
+if (!file.exists(workflow_config_path)) {
+  stop(
+    "Workflow config not found: ", workflow_config_path,
+    "\nRun 02_generate_xml.Rmd first."
+  )
+}
+
+workflow_config <- readRDS(workflow_config_path)
+console_path <- workflow_config$console_log_path
+
+if (!isTRUE(workflow_config$validate_csparsej_solver)) {
+  stop(
+    "The latest workflow config does not have validate_csparsej_solver = TRUE."
+  )
+}
+
+if (!file.exists(console_path)) {
+  stop(
+    "Saved Eclipse console log not found: ", console_path,
+    "\nIn Eclipse Run Configurations > Common, tick 'File' under Standard Input and Output ",
+    "and set the output file to this path, then rerun BEAST."
+  )
+} else {
+
+  lines <- readLines(console_path, warn = FALSE)
+  validation_lines <- grep("CSparseJ validation:", lines, value = TRUE)
+
+  extract_number <- function(pattern, x) {
+    as.numeric(sub(paste0(".*", pattern, " = ([^ ]+).*"), "\\1", x))
+  }
+
+  results <- data.frame(
+    line = seq_along(validation_lines),
+    max_abs_difference_vs_internal_sparse_cholesky =
+      extract_number("max_abs_difference_vs_internal_sparse_cholesky", validation_lines),
+    max_abs_difference_vs_pcg =
+      extract_number("max_abs_difference_vs_pcg", validation_lines),
+    csparsej_residual_norm =
+      extract_number("csparsej_residual_norm", validation_lines),
+    internal_sparse_cholesky_residual_norm =
+      extract_number("internal_sparse_cholesky_residual_norm", validation_lines),
+    pcg_residual_norm =
+      extract_number("pcg_residual_norm", validation_lines),
+    csparsej_cholesky_nonzeros =
+      extract_number("csparsej_cholesky_nonzeros", validation_lines),
+    pcg_iterations =
+      extract_number("pcg_iterations", validation_lines),
+    pcg_final_residual =
+      extract_number("pcg_final_residual", validation_lines)
+  )
+
+  csparsej_validation_results <- data.frame(
+      statistic = c("min", "max", "median", "mean", "variance"),
+
+      max_abs_difference_vs_internal_sparse_cholesky = c(
+        min(results$max_abs_difference_vs_internal_sparse_cholesky, na.rm = TRUE),
+        max(results$max_abs_difference_vs_internal_sparse_cholesky, na.rm = TRUE),
+        median(results$max_abs_difference_vs_internal_sparse_cholesky, na.rm = TRUE),
+        mean(results$max_abs_difference_vs_internal_sparse_cholesky, na.rm = TRUE),
+        var(results$max_abs_difference_vs_internal_sparse_cholesky, na.rm = TRUE)
+      ),
+      
+      max_abs_difference_vs_pcg = c(
+        min(results$max_abs_difference_vs_pcg, na.rm = TRUE),
+        max(results$max_abs_difference_vs_pcg, na.rm = TRUE),
+        median(results$max_abs_difference_vs_pcg, na.rm = TRUE),
+        mean(results$max_abs_difference_vs_pcg, na.rm = TRUE),
+        var(results$max_abs_difference_vs_pcg, na.rm = TRUE)
+      ),
+
+      csparsej_residual_norm = c(
+        min(results$csparsej_residual_norm, na.rm = TRUE),
+        max(results$csparsej_residual_norm, na.rm = TRUE),
+        median(results$csparsej_residual_norm, na.rm = TRUE),
+        mean(results$csparsej_residual_norm, na.rm = TRUE),
+        var(results$csparsej_residual_norm, na.rm = TRUE)
+      ),
+      
+      internal_sparse_cholesky_residual_norm = c(
+        min(results$internal_sparse_cholesky_residual_norm, na.rm = TRUE),
+        max(results$internal_sparse_cholesky_residual_norm, na.rm = TRUE),
+        median(results$internal_sparse_cholesky_residual_norm, na.rm = TRUE),
+        mean(results$internal_sparse_cholesky_residual_norm, na.rm = TRUE),
+        var(results$internal_sparse_cholesky_residual_norm, na.rm = TRUE)
+      ),
+      
+      pcg_residual_norm = c(
+        min(results$pcg_residual_norm, na.rm = TRUE),
+        max(results$pcg_residual_norm, na.rm = TRUE),
+        median(results$pcg_residual_norm, na.rm = TRUE),
+        mean(results$pcg_residual_norm, na.rm = TRUE),
+        var(results$pcg_residual_norm, na.rm = TRUE)
+      ),
+
+      csparsej_cholesky_nonzeros = c(
+        min(results$csparsej_cholesky_nonzeros, na.rm = TRUE),
+        max(results$csparsej_cholesky_nonzeros, na.rm = TRUE),
+        median(results$csparsej_cholesky_nonzeros, na.rm = TRUE),
+        mean(results$csparsej_cholesky_nonzeros, na.rm = TRUE),
+        var(results$csparsej_cholesky_nonzeros, na.rm = TRUE)
+      ),
+      
+      pcg_iterations = c(
+        min(results$pcg_iterations, na.rm = TRUE),
+        max(results$pcg_iterations, na.rm = TRUE),
+        median(results$pcg_iterations, na.rm = TRUE),
+        mean(results$pcg_iterations, na.rm = TRUE),
+        var(results$pcg_iterations, na.rm = TRUE)
+      ),
+      
+      pcg_final_residual = c(
+        min(results$pcg_final_residual, na.rm = TRUE),
+        max(results$pcg_final_residual, na.rm = TRUE),
+        median(results$pcg_final_residual, na.rm = TRUE),
+        mean(results$pcg_final_residual, na.rm = TRUE),
+        var(results$pcg_final_residual, na.rm = TRUE)
+      )
+    )
+  
+    print(csparsej_validation_results)
+}
+```
+Interpretation:
+
+- `max_abs_difference_vs_internal_sparse_cholesky` measures, for each solver-validation event, the largest absolute difference between the CSparseJ solution vector and the internal sparse Cholesky reference solution
+- `max_abs_difference_vs_pcg` measures the corresponding largest absolute entry-wise difference between the CSparseJ solution vector and the PCG solution vector
+- `csparsej_residual_norm`, `internal_sparse_cholesky_residual_norm`, `pcg_residual_norm` measure how well each solver satisfies the linear system ||C * ^x − b|| where C is the posterior precision matrix, b the right-hand side, and ^x the solver’s proposed solution. For an exact solve, C * ^x = b, so the lower the better.
+- `pcg_iterations`, `pcg_final_residual` report convergence behaviour of the iterative PCG solver.
+- `csparsej_cholesky_nonzeros` reports the sparsity/fill-in of the CSparseJ Cholesky factorisation.
+
+Expected behaviour:
+
+- CSparseJ and the internal sparse Cholesky reference solver should agree to near machine precision, with extremely small maximum absolute differences and residual norms.
+- PCG differences and residual norms may be noticeably larger as PCG is an iterative approximate solver with its accuracy depending on convergence tolerance and conditioning of the linear system. (Improves with lower tolerance, but that increases runtime massively.)
+- Cholesky nonzero counts may vary slightly across iterations as changing tree topologies alter the sparsity structure of the precision matrix.
+

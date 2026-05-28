@@ -1,0 +1,100 @@
+## BEAST 2.7 Eclipse setup notes
+
+1) Install:
+- Eclipse IDE for Java Developers
+- Git for Windows
+- Azul Zulu JDK 17 with JavaFX
+- Java, Javac
+
+Important: Use the JDK FX build from Azul, not a plain JRE.
+
+2) Settings in Eclipse
+
+In Eclipse: Window > Preferences > Java > Installed JREs
+-> Add: path to zulu17, set as default
+In Eclipse: Window > Preferences > Java > Compiler
+-> Set compiler compliance level to 17
+
+3) Download BEAST source
+
+In PowerShell (after setting up folder):
+
+cd C:\Users\jonas\BEAST
+git clone https://github.com/CompEvol/beast2.git
+git clone https://github.com/CompEvol/BeastFX.git
+
+4) create beast2 project
+
+A. In Eclipse: File > New > Java Project
+-> Project name: beast2
+-> Location: C:\Users\jonas\BEAST\beast2
+-> Settings:
+	JRE: zulu17
+	Create module-info.java: UNCHECKED
+
+B. Click Next, go to Libraries tab:.
+-> keep/add these jars on the CLASSPATH:
+	- beast2/lib/antlr-runtime-4.10.1.jar
+	- beast2/lib/beagle.jar
+	- beast2/lib/colt.jar
+	- beast2/lib/commons-math3-3.6.1.jar
+	- beast2/lib/junit/junit-platform-console-standalone-1.8.2.jar
+-> Don't add:
+	- DensiTree.jar
+	- jsign-3.1.jar
+
+C. Finish project creation.
+
+D. If Eclipse creates or detects: beast2/src/module-info.java -> delete it
+
+E. Project > Clean...
+
+Expected: 0 errors, warnings only.
+
+5) Create BeastFX project:
+
+A. In Eclipse: File > New > Java Project
+-> Project name: BeastFX
+-> Location: C:\Users\jonas\BEAST\BeastFX
+-> Settings:
+	JRE: zulu17
+	Create module-info.java: UNCHECKED
+
+B. Click Next, go to Projects tab:
+	-> Select: Classpath
+		-> Click: Add...
+			-> Add: beast2
+
+C. Go to Libraries tab:
+	-> Under CLASSPATH, keep/add:
+		- BeastFX/locallib/assertj-core-3.20.2.jar
+		- BeastFX/locallib/jam.jar
+		- BeastFX/locallib/testfx.jar
+		- beast2/lib/antlr-runtime-4.10.1.jar
+		- beast2/lib/beagle.jar
+		- beast2/lib/colt.jar
+		- beast2/lib/commons-math3-3.6.1.jar
+		- beast2/lib/junit/junit-platform-console-standalone-1.8.2.jar
+
+D. Finish project creation, close Eclipse
+
+F. Open: C:\Users\jonas\BEAST\BeastFX.classpath
+	Find:
+<classpathentry kind="con" path="org.eclipse.jdt.launching.JRE_CONTAINER">
+    <attributes>
+        <attribute name="module" value="true"/>
+    </attributes>
+</classpathentry>
+
+	-> Replace with:
+
+<classpathentry kind="con" path="org.eclipse.jdt.launching.JRE_CONTAINER"/>
+
+	-> Save file.
+
+G. Reopen Eclipse. Don't delete/recreate BeastFX after this, because Eclipse may regenerate the bad module entry.
+
+E. Project > Clean...
+
+Expected:
+0 errors, warnings only.

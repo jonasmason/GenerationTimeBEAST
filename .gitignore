@@ -1,0 +1,43 @@
+# R
+.Rhistory
+.RData
+.Rproj.user/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Eclipse
+.metadata/
+bin/
+
+# Java
+*.class
+
+# BEAST outputs
+*.log
+*.trees
+*.state
+*.state.backup.xml
+*.backup.xml
+
+# Generated outputs
+data/output/
+data/simulated/
+data/xml/
+
+# Large external outputs
+D:/BEAST/
+
+# Validation/debug exports
+*_snapshot_*
+beast_node_order.csv
+beast_latent_precision_triplets.csv
+brownian_variance_gibbs_diagnostics.csv
+
+# Temporary
+tmp/
+temp/
+
+# Optional local overrides
+config/paths_local.R

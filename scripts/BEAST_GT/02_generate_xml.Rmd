@@ -1,0 +1,793 @@
+---
+title: "02 - Generate BEAST XML for generation-time changing-tree workflow"
+author: "Jonas Mason"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+
+source("../../config/paths.R")
+
+experiment_name <- "gt_100taxa_high_signal"
+beast_run_name <- "dynamic_sequence_gt"
+
+paths <- make_run_paths(experiment_name)
+
+sim_data_path <- file.path(
+  paths$sim_data_dir,
+  paste0(experiment_name, "_sim_data.rds")
+)
+
+beast_output_dir <- paths$beast_output_dir
+xml_dir <- paths$xml_dir
+
+output_prefix <- experiment_name
+xml_prefix <- experiment_name
+```
+
+
+# Purpose
+
+This is the main XML-generation file.
+
+Below one can choose which validation/debug/testing steps to include. If all are set to `FALSE`, the file writes a minimal XML that calls the Java operators:
+
+```text
+gentime.GenerationTimeGibbsOperator
+gentime.GenerationTimeLikelihood
+gentime.GenerationTimePrecisionBuilder
+gentime.GenerationTimeVarianceGibbsOperator
+gentime.GenerationTimeResidualVarianceGibbsOperator
+gentime.GenerationTimeInverseGammaPrior
+gentime.GenerationTimeTraitData
+```
+and the helper classes pulled internally:
+
+```text
+gentime.CSparseJSolver.java
+gentime.GenerationTimeMathUtils.java
+gentime.GenerationTimeTraitTransform.java
+```
+
+which are trimmed to just the essential functionalities, and will be the ones used for actual runs.
+
+If any validation/debug/testing toggle is `TRUE`, this file writes a validation XML that calls the test versions of these files:
+
+```text
+gentime.GenerationTimeGibbsOperatorTest.java
+gentime.GenerationTimeLikelihoodTest.java
+gentime.GenerationTimePrecisionBuilderTest.java
+gentime.GenerationTimeVarianceGibbsOperatorTest.java
+gentime.GenerationTimeResidualVarianceGibbsOperatorTest.java
+gentime.GenerationTimeRandomWalkOperator.java
+```
+and activates the requested XML options for debugging etc. 
+
+# Settings
+
+```{r settings}
+library(ape)
+
+if (!file.exists(sim_data_path)) {
+  stop("Simulation data not found. Run 01_simulate_data.Rmd first: ", sim_data_path)
+}
+
+sim_data <- readRDS(sim_data_path)
+
+tree <- sim_data$tree
+y <- sim_data$y
+dna_sequences <- sim_data$dna_sequences
+
+prior_beta_mean <- sim_data$prior$beta_mean
+prior_beta_variance <- sim_data$prior$beta_variance
+
+scale_for_beast <- "raw"  # "raw" or "log"
+
+chain_length <- 10000
+log_every <- 1
+tree_log_every <- 1000
+screen_log_every <- 1000
+
+beast_xml_path <- file.path(
+  xml_dir,
+  paste0(xml_prefix, "_", beast_run_name, ".xml")
+)
+
+beast_log_file <- paste0(output_prefix, "_", beast_run_name, ".log")
+beast_log_path <- file.path(beast_output_dir, beast_log_file)
+
+beast_tree_file <- paste0(output_prefix, "_", beast_run_name, ".trees")
+beast_tree_path <- file.path(beast_output_dir, beast_tree_file)
+
+console_log_file <- paste0(output_prefix, "_", beast_run_name, "_console.log")
+console_log_path <- file.path(beast_output_dir, console_log_file)
+
+workflow_config_path <- file.path(
+  beast_output_dir,
+  paste0("latest_workflow_config_", beast_run_name, ".rds")
+)
+```
+
+# Validation/debug/testing options
+
+```{r validation-options}
+# Solver correctness
+validate_csparsej_solver <- FALSE
+pcg_tolerance <- 1e-5
+# Stricter PCG tolerances like e.g. 1e-10 make the PCG reference more accurate,
+# but will increase runtime substantially.
+
+# Runtime profiling printed to Eclipse console
+profile_gibbs_runtime <- FALSE
+profile_frequency <- 250
+
+# Dynamic-tree snapshot export; required for post-run precision and conditional checks
+export_dynamic_snapshots <- FALSE
+snapshot_frequency <- 100
+
+# Post-run validations that require dynamic snapshots
+# (Either of these set to TRUE also force snapshot export)
+validate_dynamic_precision <- FALSE
+validate_dynamic_conditional <- FALSE
+
+# Frozen-tree validation requires dynamic snapshots first
+prepare_frozen_tree_validation <- FALSE
+
+# Low-level debug outputs
+print_precision_refresh <- FALSE
+write_latent_precision_diagnostics <- FALSE
+write_posterior_mean_diagnostics <- FALSE
+print_gibbs_debug <- FALSE
+debug_likelihood <- FALSE
+debug_trait_data <- FALSE
+debug_precision_builder <- FALSE
+debug_brownian_variance_gibbs <- FALSE
+debug_residual_variance_gibbs <- FALSE
+
+# Fixed tree for comparison
+use_fixed_tree <- FALSE
+
+# Brownian variance diagnostic CSV
+write_brownian_variance_diagnostics <- FALSE
+
+# Partial-write experiments
+write_beta_state <- TRUE
+write_generation_times_state <- TRUE
+# These control whether the Gibbs operator actually writes sampled beta and/or 
+# latent generation-time states back into the BEAST state. Any configuration 
+# other than TRUE / TRUE is a validation/debugging experiment and automatically
+# switches the XML to calling GenerationTimeGibbsOperatorTest.
+
+# Practical implications of different combinations:
+# TRUE / TRUE
+#   Normal Gibbs operator behaviour
+#
+# FALSE / TRUE
+#   Only latent generation-time states u are written.
+#   -> Isolates latent-state behaviour independently of beta
+#
+# TRUE / FALSE
+#   Only beta is written.
+#   -> Useful for debugging likelihood synchronisation and operator accounting
+#
+# FALSE / FALSE
+#   Full dry-run mode.
+#   -> Gibbs calculations are performed internally, but no BEAST state is
+#      changed. Useful for profiling and conditional-Gaussian diagnostics.
+
+
+# Automatic consequences
+export_dynamic_snapshots <- export_dynamic_snapshots ||
+  validate_dynamic_precision ||
+  validate_dynamic_conditional ||
+  prepare_frozen_tree_validation
+
+use_validation_java <- any(
+  validate_csparsej_solver,
+  profile_gibbs_runtime,
+  export_dynamic_snapshots,
+  validate_dynamic_precision,
+  validate_dynamic_conditional,
+  prepare_frozen_tree_validation,
+  print_precision_refresh,
+  write_latent_precision_diagnostics,
+  write_posterior_mean_diagnostics,
+  print_gibbs_debug,
+  debug_likelihood,
+  debug_precision_builder,
+  debug_brownian_variance_gibbs,
+  debug_residual_variance_gibbs,
+  write_brownian_variance_diagnostics,
+  !write_beta_state,
+  !write_generation_times_state
+)
+
+needs_console_log <- any(
+  validate_csparsej_solver,
+  profile_gibbs_runtime
+)
+
+needs_beast_debug_vm <- any(
+  print_gibbs_debug,
+  debug_likelihood,
+  debug_trait_data,
+  debug_precision_builder,
+  debug_brownian_variance_gibbs,
+  debug_residual_variance_gibbs,
+  validate_dynamic_conditional
+)
+
+
+gt_gibbs_operator_spec <- if (use_validation_java) {
+  "gentime.GenerationTimeGibbsOperatorTest"
+} else {
+  "gentime.GenerationTimeGibbsOperator"
+}
+
+gt_likelihood_spec <- if (debug_likelihood) {
+  "gentime.GenerationTimeLikelihoodTest"
+} else {
+  "gentime.GenerationTimeLikelihood"
+}
+
+gt_precision_builder_spec <- if (debug_precision_builder) {
+  "gentime.GenerationTimePrecisionBuilderTest"
+} else {
+  "gentime.GenerationTimePrecisionBuilder"
+}
+
+gt_brownian_variance_gibbs_spec <- if (use_validation_java) {
+  "gentime.GenerationTimeVarianceGibbsOperatorTest"
+} else {
+  "gentime.GenerationTimeVarianceGibbsOperator"
+}
+
+gt_residual_variance_gibbs_spec <- if (use_validation_java) {
+  "gentime.GenerationTimeResidualVarianceGibbsOperatorTest"
+} else {
+  "gentime.GenerationTimeResidualVarianceGibbsOperator"
+}
+
+
+
+
+gt_likelihood_debug_attribute <- if (debug_likelihood) {
+  paste0('\n                          debug="', xml_bool(debug_likelihood), '"')
+} else {
+  ""
+}
+
+gt_precision_builder_debug_attribute <- if (debug_precision_builder) {
+  paste0('\n                                  debug="', xml_bool(debug_precision_builder), '"')
+} else {
+  ""
+}
+
+gt_brownian_variance_debug_attribute <- if (debug_brownian_variance_gibbs) {
+  paste0('\n                  debug="', xml_bool(debug_brownian_variance_gibbs), '"')
+} else {
+  ""
+}
+
+gt_brownian_variance_diagnostics_attributes <- if (write_brownian_variance_diagnostics) {
+  paste0(
+    '\n                  tree="@tree"',
+    '\n                  outputDirectory="', beast_output_dir_xml, '"',
+    '\n                  writeDiagnostics="', xml_bool(write_brownian_variance_diagnostics), '"'
+  )
+} else {
+  ""
+}
+
+gt_residual_variance_debug_attribute <- if (debug_residual_variance_gibbs) {
+  paste0('\n                  debug="', xml_bool(debug_residual_variance_gibbs), '"')
+} else {
+  ""
+}
+
+
+cat("use_validation_java =", use_validation_java, "\n")
+cat("gt_gibbs_operator_spec =", gt_gibbs_operator_spec, "\n")
+cat("gt_likelihood_operator_spec =", gt_likelihood_spec, "\n")
+cat("gt_precision_builder_spec =", gt_precision_builder_spec, "\n")
+cat("gt_brownian_variance_gibbs_spec =", gt_brownian_variance_gibbs_spec, "\n")
+cat("gt_residual_variance_gibbs_spec =", gt_residual_variance_gibbs_spec, "\n")
+```
+
+# XML construction helper functions
+
+```{r xml-helpers}
+xml_bool <- function(x) tolower(as.character(isTRUE(x)))
+
+xml_path <- function(path) normalizePath(path, winslash = "/", mustWork = FALSE)
+
+tip_values <- as.numeric(y)
+names(tip_values) <- names(y)
+
+if (scale_for_beast == "raw") {
+  state_tip_values <- tip_values
+  trait_values_for_xml <- tip_values
+}
+
+if (scale_for_beast == "log") {
+  if (any(tip_values <= 0)) {
+    stop("Cannot use log scale: some tip values are <= 0.")
+  }
+  state_tip_values <- log(tip_values)
+  trait_values_for_xml <- tip_values
+}
+
+n_tips <- length(tree$tip.label)
+n_nodes <- n_tips + tree$Nnode
+
+beast_tip_order <- sort(tree$tip.label)
+
+state_tip_values_beast_order <- state_tip_values[beast_tip_order]
+
+initial_beta_value <- mean(state_tip_values_beast_order)
+initial_residual_variance_value <- var(state_tip_values_beast_order)
+
+generation_time_state <- rep(0.0, n_nodes)
+
+trait_string <- paste(
+  paste0(
+    names(trait_values_for_xml),
+    "=",
+    signif(trait_values_for_xml, 12)
+  ),
+  collapse = ","
+)
+
+generation_time_state_string <- paste(
+  signif(generation_time_state, 12),
+  collapse = " "
+)
+
+newick_string <- write.tree(tree)
+
+alignment_xml <- paste(
+  c(
+    '    <data id="alignment" dataType="nucleotide">',
+    paste0(
+      '        <sequence id="seq_',
+      names(dna_sequences),
+      '" taxon="',
+      names(dna_sequences),
+      '" value="',
+      dna_sequences,
+      '"/>'
+    ),
+    '    </data>'
+  ),
+  collapse = "\n"
+)
+
+test_only_attributes <- if (use_validation_java) {
+  paste0(
+    '\n                  outputDirectory="', xml_path(beast_output_dir), '"',
+    '\n                  solver="csparsej"',
+    '\n                  compareSolvers="', xml_bool(validate_csparsej_solver), '"',
+    '\n                  maxCgIterations="10000"',
+    '\n                  cgTolerance="', pcg_tolerance, '"',
+    '\n                  writePosteriorMean="', xml_bool(write_posterior_mean_diagnostics), '"',
+    '\n                  writeLatentPrecisionDiagnostics="', xml_bool(write_latent_precision_diagnostics), '"',
+    '\n                  profile="', xml_bool(profile_gibbs_runtime), '"',
+    '\n                  profileFrequency="', profile_frequency, '"',
+    '\n                  printPrecisionRefresh="', xml_bool(print_precision_refresh), '"',
+    '\n                  snapshotFrequency="', if (export_dynamic_snapshots) snapshot_frequency else 0, '"',
+    '\n                  snapshotPrefix="gt_', beast_run_name, '_snapshot"',
+    '\n                  writeBeta="', xml_bool(write_beta_state), '"',
+    '\n                  writeGenerationTimes="', xml_bool(write_generation_times_state), '"',
+    '\n                  debug="', xml_bool(print_gibbs_debug), '"'
+  )
+} else {
+  ""
+}
+```
+
+# XML text
+
+```{r write-xml}
+gt_state_xml <- paste0(
+'
+            <parameter id="generationTimes"
+                       name="stateNode"
+                       spec="parameter.RealParameter"
+                       dimension="', n_nodes, '"
+                       value="', generation_time_state_string, '"/>
+
+            <parameter id="brownianVariance"
+                       name="stateNode"
+                       spec="parameter.RealParameter"
+                       dimension="1"
+                       value="1.0"
+                       lower="0.0"/>
+
+            <parameter id="beta"
+                       name="stateNode"
+                       spec="parameter.RealParameter"
+                       dimension="1"
+                       value="', signif(initial_beta_value, 12), '"/>
+
+            <parameter id="residualVariance"
+                       name="stateNode"
+                       spec="parameter.RealParameter"
+                       dimension="1"
+                       lower="0.0"
+                       value="', signif(initial_residual_variance_value, 12), '"/>
+'
+)
+
+sequence_likelihood_xml <- paste0(
+'
+            <distribution id="treeLikelihood"
+                          spec="beast.base.evolution.likelihood.TreeLikelihood"
+                          data="@alignment"
+                          tree="@tree">
+
+                <siteModel id="siteModel"
+                           spec="beast.base.evolution.sitemodel.SiteModel">
+
+                    <substModel id="jc"
+                                spec="beast.base.evolution.substitutionmodel.JukesCantor"/>
+
+                </siteModel>
+
+                <branchRateModel id="strictClock"
+                                 spec="beast.base.evolution.branchratemodel.StrictClockModel">
+
+                    <parameter id="clockRate"
+                               spec="parameter.RealParameter"
+                               name="clock.rate"
+                               value="', signif(sim_data$settings$jc_clock_rate, 12), '"
+                               lower="0.0"/>
+
+                </branchRateModel>
+
+            </distribution>
+'
+)
+
+gt_likelihood_xml <- paste0(
+'
+            <distribution id="gtLikelihood"
+                          spec="', gt_likelihood_spec, '"
+                          tree="@tree"
+                          generationTimes="@generationTimes"
+                          beta="@beta"
+                          brownianVariance="@brownianVariance"
+                          residualVariance="@residualVariance"
+                          priorBetaMean="', prior_beta_mean, '"
+                          priorBetaVariance="', prior_beta_variance, '"
+                          scale="', scale_for_beast, '"', 
+                          gt_likelihood_debug_attribute, '>
+
+                <traitData id="gtData"
+                           spec="gentime.GenerationTimeTraitData"
+                           tree="@tree"
+                           value="', trait_string, '"
+                           debug="', xml_bool(debug_trait_data), '"/>
+
+                <precisionBuilder id="gtPrecision"
+                                  spec="', gt_precision_builder_spec, '"
+                                  tree="@tree"', gt_precision_builder_debug_attribute, '/>
+
+            </distribution>
+'
+)
+
+tree_prior_xml <- '
+            <distribution id="treePrior"
+                          spec="beast.base.evolution.speciation.YuleModel"
+                          tree="@tree"
+                          birthDiffRate="1.0"/>
+'
+
+gt_variance_prior_xml <- '
+            <distribution id="brownianVariancePrior"
+                          spec="gentime.GenerationTimeInverseGammaPrior"
+                          parameter="@brownianVariance"
+                          alpha="2.0"
+                          beta="1.0"/>
+
+            <distribution id="residualVariancePrior"
+                          spec="gentime.GenerationTimeInverseGammaPrior"
+                          parameter="@residualVariance"
+                          alpha="2.0"
+                          beta="1.0"/>
+'
+
+gt_operator_xml <- paste0(
+'
+        <operator id="gtGibbs"
+                  spec="', gt_gibbs_operator_spec, '"
+                  tree="@tree"
+                  generationTimes="@generationTimes"
+                  beta="@beta"
+                  brownianVariance="@brownianVariance"
+                  residualVariance="@residualVariance"
+                  traitData="@gtData"
+                  precisionBuilder="@gtPrecision"
+                  gtLikelihood="@gtLikelihood"
+                  priorBetaMean="', prior_beta_mean, '"
+                  priorBetaVariance="', prior_beta_variance, '"
+                  scale="', scale_for_beast, '"',
+                  test_only_attributes, '
+                  weight="0.1"/>
+
+        <operator id="gtBrownianVarianceGibbs"
+                  spec="', gt_brownian_variance_gibbs_spec, '"
+                  generationTimes="@generationTimes"
+                  brownianVariance="@brownianVariance"
+                  precisionBuilder="@gtPrecision"
+                  gtLikelihood="@gtLikelihood"
+                  priorAlpha="2.0"
+                  priorBeta="1.0"',
+                  gt_brownian_variance_diagnostics_attributes,
+                  gt_brownian_variance_debug_attribute, '
+                  weight="0.1"/>
+
+        <operator id="gtResidualVarianceGibbs"
+                  spec="', gt_residual_variance_gibbs_spec, '"
+                  tree="@tree"
+                  generationTimes="@generationTimes"
+                  beta="@beta"
+                  residualVariance="@residualVariance"
+                  traitData="@gtData"
+                  gtLikelihood="@gtLikelihood"
+                  priorAlpha="2.0"
+                  priorBeta="1.0"
+                  scale="', scale_for_beast, '"',
+                  gt_residual_variance_debug_attribute, '
+                  weight="0.1"/>
+'
+)
+
+tree_operator_xml <- '
+        <operator id="treeScaler"
+                  spec="beast.base.evolution.operator.ScaleOperator"
+                  tree="@tree"
+                  scaleFactor="0.95"
+                  weight="0.05"/>
+
+        <operator id="treeRootScaler"
+                  spec="beast.base.evolution.operator.ScaleOperator"
+                  tree="@tree"
+                  rootOnly="true"
+                  scaleFactor="0.95"
+                  weight="0.05"/>
+
+        <operator id="uniformNodeHeights"
+                  spec="beast.base.evolution.operator.Uniform"
+                  tree="@tree"
+                  weight="0.1"/>
+
+        <operator id="narrowExchange"
+                  spec="beast.base.evolution.operator.Exchange"
+                  tree="@tree"
+                  isNarrow="true"
+                  weight="0.05"/>
+
+        <operator id="wideExchange"
+                  spec="beast.base.evolution.operator.Exchange"
+                  tree="@tree"
+                  isNarrow="false"
+                  weight="0.02"/>
+
+        <operator id="wilsonBalding"
+                  spec="beast.base.evolution.operator.WilsonBalding"
+                  tree="@tree"
+                  weight="0.02"/>
+'
+
+screen_gt_logger_xml <- '
+            <log idref="beta"/>
+            <log idref="brownianVariance"/>
+            <log idref="residualVariance"/>
+            <log idref="clockRate"/>
+'
+
+file_gt_logger_xml <- '
+            <log idref="beta"/>
+            <log idref="brownianVariance"/>
+            <log idref="residualVariance"/>
+            <log idref="clockRate"/>
+            <log id="treeHeight"
+                 spec="beast.base.evolution.tree.TreeHeightLogger"
+                 tree="@tree"/>
+'
+
+xml_text <- paste0(
+'<?xml version="1.0" encoding="UTF-8"?>
+
+<beast version="2.7"
+       namespace="beast.base.inference:beast.base.evolution.tree:gentime">
+
+', alignment_xml, '
+
+    <run id="mcmc"
+         spec="beast.base.inference.MCMC"
+         chainLength="', chain_length, '">
+
+        <state id="state">
+
+            <tree id="tree"
+                  name="stateNode"
+                  spec="beast.base.evolution.tree.TreeParser"
+                  newick="', newick_string, '"
+                  IsLabelledNewick="true"
+                  adjustTipHeights="true"/>
+
+', gt_state_xml, '
+
+        </state>
+
+        <distribution id="posterior"
+                      spec="beast.base.inference.CompoundDistribution">
+
+', sequence_likelihood_xml, '
+', gt_likelihood_xml, '
+', if (use_fixed_tree) "" else tree_prior_xml, '
+', gt_variance_prior_xml, '
+
+        </distribution>
+
+', gt_operator_xml, '
+', if (use_fixed_tree) "" else tree_operator_xml, '
+
+        <logger id="screenlog"
+                spec="beast.base.inference.Logger"
+                logEvery="', screen_log_every, '">
+            <log idref="posterior"/>
+', screen_gt_logger_xml, '
+        </logger>
+
+        <logger id="filelog"
+                spec="beast.base.inference.Logger"
+                fileName="', beast_log_file, '"
+                logEvery="', log_every, '">
+            <log idref="posterior"/>
+', file_gt_logger_xml, '
+        </logger>
+
+        <logger id="treelog"
+                spec="beast.base.inference.Logger"
+                fileName="', beast_tree_file, '"
+                logEvery="', tree_log_every, '"
+                mode="tree">
+            <log id="treeLogger"
+                 spec="beast.base.evolution.TreeWithMetaDataLogger"
+                 tree="@tree"/>
+        </logger>
+
+    </run>
+
+</beast>
+'
+)
+
+old_outputs <- c(
+  beast_log_path,
+  console_log_path,
+  beast_tree_path,
+  file.path(beast_output_dir, "beast_node_order.csv"),
+  file.path(beast_output_dir, "beast_latent_precision_triplets.csv"),
+  file.path(beast_output_dir, "brownian_variance_gibbs_diagnostics.csv")
+)
+
+unlink(old_outputs[file.exists(old_outputs)])
+
+writeLines(xml_text, beast_xml_path)
+
+workflow_config <- list(
+  experiment_name = experiment_name,
+  beast_run_name = beast_run_name,
+  run_name = beast_run_name,
+  output_prefix = output_prefix,
+  xml_prefix = xml_prefix,
+  beast_output_dir = beast_output_dir,
+  beast_xml_path = beast_xml_path,
+  beast_log_path = beast_log_path,
+  console_log_path = console_log_path,
+  use_validation_java = use_validation_java,
+  gt_gibbs_operator_spec = gt_gibbs_operator_spec,
+  validate_csparsej_solver = validate_csparsej_solver,
+  profile_gibbs_runtime = profile_gibbs_runtime,
+  export_dynamic_snapshots = export_dynamic_snapshots,
+  validate_dynamic_precision = validate_dynamic_precision,
+  validate_dynamic_conditional = validate_dynamic_conditional,
+  prepare_frozen_tree_validation = prepare_frozen_tree_validation,
+  beast_tree_file = beast_tree_file,
+  beast_tree_path = beast_tree_path,
+  tree_log_every = tree_log_every
+  )
+
+saveRDS(workflow_config, workflow_config_path)
+
+cat(
+  "Wrote XML to:\n",
+  beast_xml_path,
+  "\n\n",
+  "Wrote workflow metadata to:\n",
+  workflow_config_path,
+  "\n\n",
+  "Operator class selected:\n",
+  gt_gibbs_operator_spec,
+  "\n\n\n",
+  "Run in Eclipse:\n\n",
+  "In Run Configurations > Arguments tab:\n\n",
+  "1) In the 'Program arguments' box, enter:\n\n",
+  "-version_file version.xml -overwrite \"",
+  xml_path(beast_xml_path),
+  "\"\n\n",
+  "2) In 'Working directory', select 'Other' and enter:\n\n",
+  xml_path(beast_output_dir),
+  "\n",
+  sep = ""
+)
+
+cat(
+  "\n\nRun summary:\n",
+  "experiment_name: ", experiment_name, "\n",
+  "beast_run_name: ", beast_run_name, "\n",
+  "sim_data_path: ", sim_data_path, "\n",
+  "beast_xml_path: ", beast_xml_path, "\n",
+  "beast_log_path: ", beast_log_path, "\n",
+  "beast_tree_path: ", beast_tree_path, "\n",
+  "chain_length: ", chain_length, "\n",
+  "log_every: ", log_every, "\n",
+  "tree_log_every: ", tree_log_every, "\n",
+  sep = ""
+)
+
+if (needs_console_log) {
+  cat(
+    "\n\n",
+    "To save the console output, in the Run Configurations, go to the 'Common' tab, then under 'Standard Input and Output', tick 'Output File' and set the output file to:\n\n",
+    console_log_path,
+    "\n\n\n",
+    sep= ""
+  )
+}
+
+if (needs_beast_debug_vm) {
+  cat(
+    "Additionally, to activate BEAST's internal debug consistency checks, in the Run Configurations, go to the 'Arguments' tab, and in the 'VM arguments:' box, enter:\n\n",
+    "-Dbeast.debug=true\n\n",
+    "This makes BEAST repeatedly recalculate posterior components during proposals and store/restore operations to verify that operators leave the state internally consistent after accept/reject steps. Use this when debugging dynamic-tree runs, especially if we suspect posterior inconsistencies, state-sync problems, or issues after topology/node-height proposals. It will increase the runtime for BEAST's first 6000 iterations to a degree, though manageable (~1 extra minute).\n",
+    sep = ""
+  )
+}
+```
+
+# Post-run instructions
+
+```{r post-run-instructions, results='asis'}
+cat("\n## After the BEAST run\n\n")
+
+if (!use_validation_java) {
+  cat("- This was a minimal runtime run - no post-run validation. Continue in `09_summarise_beast_posterior.Rmd`.\n")
+}
+
+if (validate_csparsej_solver) {
+  cat("- CSparseJ solver validation was activated. Continue in `03_validate_csparsej_solver.Rmd`.\n")
+}
+
+if (profile_gibbs_runtime) {
+  cat("- Runtime profiling was activated. Continue in `04_profile_runtime.Rmd`.\n")
+}
+
+if (validate_dynamic_precision) {
+  cat("- Dynamic snapshot precision validation was activated. Continue in `05_validate_dynamic_precision.Rmd`.\n")
+}
+
+if (validate_dynamic_conditional) {
+  cat("- Dynamic conditional Gaussian validation was activated. Continue in `06_validate_dynamic_conditional_gaussian.Rmd`.\n")
+}
+
+if (prepare_frozen_tree_validation) {
+  cat("- Frozen-tree validation was activated. After the dynamic BEAST run finishes, first run `06_validate_dynamic_conditional_gaussian.Rmd`. This computes how far the BEAST state deviates from the exact conditional Gaussian for each exported dynamic snapshot and saves `dynamic_conditional_gaussian_results.rds`.Then run `07_generate_frozen_tree_xml.Rmd`, which uses that file to choose which snapshot to use as the frozen-tree\n")
+}
+```
