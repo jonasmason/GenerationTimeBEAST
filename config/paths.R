@@ -5,7 +5,7 @@
 node <- Sys.info()[["nodename"]]
 
 if (node %in% c("sce-bio-c04553", "sce-bio-c06973", "SCE-BIO-C07467")) {
-  repo_dir <- Jarrod_env
+  repo_dir <-"~/Work/BEAST/GenerationTimeBEAST"
 }
 
 if (node == "DESKTOP-EBKAL1K") {
@@ -28,7 +28,7 @@ repo_dir <- normalizePath(repo_dir, winslash = "/", mustWork = TRUE)
 # -------------------------------------------------------------------
 
 if (node %in% c("sce-bio-c04553", "sce-bio-c06973", "SCE-BIO-C07467")) {
-  output_root <- Jarrod_env
+  output_root <- "~/Work/BEAST/GenerationTimeBEAST"
 }
 
 if (node == "DESKTOP-EBKAL1K") {
