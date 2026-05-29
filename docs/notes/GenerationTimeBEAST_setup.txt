@@ -3,11 +3,11 @@
 	In PowerShell:
 
 		cd ...\BEAST
-		git clone <GenerationTimeBEAST_repo_url>
+		git clone https://github.com/jonasmason/GenerationTimeBEAST.git
 
 	so the repository is now located at:
 
-		...\BEAST\GenerationTimeBEAST_repo
+		...\BEAST\GenerationTimeBEAST
 
 2) Create Eclipse Java project
 
@@ -21,7 +21,7 @@
 		GenerationTimeBEAST
 
 		Location:
-		...\BEAST\GenerationTimeBEAST_repo
+		...\BEAST\GenerationTimeBEAST
 
 		JRE:
 		zulu17
@@ -63,7 +63,7 @@
 
 	add all jars from:
 
-		GenerationTimeBEAST_repo/lib/
+		GenerationTimeBEAST/lib/
 
 	including:
 
@@ -104,7 +104,7 @@
 
 	Open:
 
-		GenerationTimeBEAST_repo/config/paths.R
+		GenerationTimeBEAST/config/paths.R
 
 	Add a machine-specific block for local machine:
 
@@ -158,7 +158,7 @@ Run the generated XML from Eclipse following the printed instructions from 02_ge
 
 <output_root>/<run_name>/beast_output/
 
-including:
+will include:
 
 .log
 .trees
