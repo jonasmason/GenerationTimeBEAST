@@ -10,8 +10,8 @@ knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
 
 source("../../config/paths.R")
 
-experiment_name <- "gt_100taxa_high_signal"
-beast_run_name <- "dynamic_sequence_gt"
+experiment_name <- "gt_100taxa_alpha2_beta1_prior"
+beast_run_name <- "dynamic_sequence_gt_check_var_prior"
 
 paths <- make_run_paths(experiment_name)
 
@@ -83,10 +83,16 @@ dna_sequences <- sim_data$dna_sequences
 prior_beta_mean <- sim_data$prior$beta_mean
 prior_beta_variance <- sim_data$prior$beta_variance
 
+prior_brownian_variance_alpha <- sim_data$prior$brownian_variance_alpha
+prior_brownian_variance_beta <- sim_data$prior$brownian_variance_beta
+
+prior_residual_variance_alpha <- sim_data$prior$residual_variance_alpha
+prior_residual_variance_beta <- sim_data$prior$residual_variance_beta
+
 scale_for_beast <- "raw"  # "raw" or "log"
 
-chain_length <- 10000
-log_every <- 1
+chain_length <- 1300000
+log_every <- 1000
 tree_log_every <- 1000
 screen_log_every <- 1000
 
@@ -485,19 +491,21 @@ tree_prior_xml <- '
                           birthDiffRate="1.0"/>
 '
 
-gt_variance_prior_xml <- '
+gt_variance_prior_xml <- paste0(
+'
             <distribution id="brownianVariancePrior"
                           spec="gentime.GenerationTimeInverseGammaPrior"
                           parameter="@brownianVariance"
-                          alpha="2.0"
-                          beta="1.0"/>
+                          alpha="', prior_brownian_variance_alpha, '"
+                          beta="', prior_brownian_variance_beta, '"/>
 
             <distribution id="residualVariancePrior"
                           spec="gentime.GenerationTimeInverseGammaPrior"
                           parameter="@residualVariance"
-                          alpha="2.0"
-                          beta="1.0"/>
+                          alpha="', prior_residual_variance_alpha, '"
+                          beta="', prior_residual_variance_beta, '"/>
 '
+)
 
 gt_operator_xml <- paste0(
 '
@@ -523,8 +531,8 @@ gt_operator_xml <- paste0(
                   brownianVariance="@brownianVariance"
                   precisionBuilder="@gtPrecision"
                   gtLikelihood="@gtLikelihood"
-                  priorAlpha="2.0"
-                  priorBeta="1.0"',
+                  priorAlpha="', prior_brownian_variance_alpha, '"
+                  priorBeta="', prior_brownian_variance_beta, '"',
                   gt_brownian_variance_diagnostics_attributes,
                   gt_brownian_variance_debug_attribute, '
                   weight="0.1"/>
@@ -537,8 +545,8 @@ gt_operator_xml <- paste0(
                   residualVariance="@residualVariance"
                   traitData="@gtData"
                   gtLikelihood="@gtLikelihood"
-                  priorAlpha="2.0"
-                  priorBeta="1.0"
+                  priorAlpha="', prior_residual_variance_alpha, '"
+                  priorBeta="', prior_residual_variance_beta, '"
                   scale="', scale_for_beast, '"',
                   gt_residual_variance_debug_attribute, '
                   weight="0.1"/>

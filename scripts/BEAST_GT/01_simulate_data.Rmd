@@ -10,7 +10,7 @@ knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
 
 source("../../config/paths.R")
 
-experiment_name <- "gt_100taxa_high_signal" # edit to reflect simulation settings
+experiment_name <- "gt_100taxa_alpha2_beta1_prior" # edit to reflect simulation settings
 
 paths <- make_run_paths(experiment_name)
 
@@ -48,6 +48,12 @@ true_intercept <- 5
 
 prior_beta_mean <- 0
 prior_beta_variance <- 1000
+
+prior_brownian_variance_alpha <- 2
+prior_brownian_variance_beta <- 1
+
+prior_residual_variance_alpha <- 2
+prior_residual_variance_beta <- 1
 ```
 
 # Packages
@@ -61,6 +67,10 @@ library(phytools)
 # Function for JC69 sequence simulation
 
 ```{r helpers}
+rinvgamma <- function(n, alpha, beta) {
+  beta / rgamma(n, shape = alpha, rate = 1)
+}
+
 simulate_jc69_alignment <- function(tree, sequence_length = 1000, rate = 0.01) {
 
   states <- c("A", "C", "G", "T")
@@ -131,8 +141,17 @@ if (rerun_simulation || !file.exists(sim_data_path)) {
 
   tree <- rcoal(ntips)
 
-  true_v_phylo <- runif(1)
-  true_v_resid <- runif(1)
+  true_v_phylo <- rinvgamma(
+    1,
+    alpha = prior_brownian_variance_alpha,
+    beta = prior_brownian_variance_beta
+  )
+  
+  true_v_resid <- rinvgamma(
+    1,
+    alpha = prior_residual_variance_alpha,
+    beta = prior_residual_variance_beta
+  )
 
   u_true <- rbv(
     tree,
@@ -165,7 +184,11 @@ if (rerun_simulation || !file.exists(sim_data_path)) {
     ),
     prior = list(
       beta_mean = prior_beta_mean,
-      beta_variance = prior_beta_variance
+      beta_variance = prior_beta_variance,
+      brownian_variance_alpha = prior_brownian_variance_alpha,
+      brownian_variance_beta = prior_brownian_variance_beta,
+      residual_variance_alpha = prior_residual_variance_alpha,
+      residual_variance_beta = prior_residual_variance_beta
     ),
     settings = list(
       experiment_name = experiment_name,

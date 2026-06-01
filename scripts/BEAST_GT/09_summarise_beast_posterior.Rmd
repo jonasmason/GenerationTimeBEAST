@@ -10,8 +10,8 @@ knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
 
 source("../../config/paths.R")
 
-experiment_name <- "gt_100taxa_high_signal"
-beast_run_name <- "dynamic_sequence_gt"
+experiment_name <- "gt_100taxa_alpha2_beta1_prior"
+beast_run_name <- "dynamic_sequence_gt_check_var_prior"
 
 paths <- make_run_paths(experiment_name)
 
