@@ -206,6 +206,8 @@ public class GenerationTimeLikelihood extends Distribution {
             
     protected double betaLogLikelihood(double beta) {
 
+    	// log density: log p(β) = -0.5 log(2*pi σ²_β) - (β - μ_β)² / (2 σ²_β)
+    	
         double priorMean = priorBetaMeanInput.get();
         double priorVariance = priorBetaVarianceInput.get();
 
@@ -223,8 +225,12 @@ public class GenerationTimeLikelihood extends Distribution {
         double residualVariance
 	) {
 	
+    	// Sum log N(y_i; β + u_tip_i, σ²_resid) over all tips
+    	
 	    double total = 0.0;
 	
+	    //  -0.5 log(2pi σ²) constant across tips, so avoid recomputation
+	    
 	    double logNormalConstant =
 	            -0.5 * Math.log(2.0 * Math.PI * residualVariance);
 	
@@ -236,6 +242,8 @@ public class GenerationTimeLikelihood extends Distribution {
 	        double latentU = generationTimes.getValue(nodeNr);
 	        double fitted = beta + latentU;
 	        double residual = observed - fitted;
+	        
+	        // = Σ_i [ -0.5 * log(2pi σ²_resid) - (y_i - (beta + u_i))^2 / (2 σ²_resid) ]
 	
 	        total += logNormalConstant
 	                -0.5 * residual * residual / residualVariance;
@@ -270,17 +278,20 @@ public class GenerationTimeLikelihood extends Distribution {
 	        }
 	
 	        double branchLength = node.getLength();
-	
-	        if (branchLength <= 0.0 ||
-	                Double.isNaN(branchLength) ||
-	                Double.isInfinite(branchLength)) {
-	            return Double.NEGATIVE_INFINITY;
-	        }
+
+		// Floor degenerate/non-finite branches to the precision builder's
+		// minBranchLength so a 0-length branch gives a finite term, not -Inf
+		// (same floor as the precision matrix Q -> normalizer stays consistent).
+		if (!(branchLength > 0.0) || Double.isInfinite(branchLength)) {
+			branchLength = precisionBuilderInput.get().getMinBranchLength();
+		}
 	
 	        logBranchLengthSum += Math.log(branchLength);
 	    }
 	
 	    int brownianRank = tree.getNodeCount() - 1;
+	    
+	    // full log-density of Brownian process: log p(u | σ², tree) = -0.5(n-1)log(2pi σ²) - ½ Σ log(length_e) - ½ u^T Q u / σ²
 	
 	    return -0.5 * brownianRank * Math.log(2.0 * Math.PI * brownianVariance)
 	            -0.5 * logBranchLengthSum
@@ -292,6 +303,8 @@ public class GenerationTimeLikelihood extends Distribution {
             RealParameter generationTimes
     ) {
 
+    	// Since Q = (branch-length)^{-1} on each edge, the quadratic form decomposes edge-by-edge as Σ_e (u_child - u_parent)² / length_e
+    	
         double total = 0.0;
 
         for (int nodeNr = 0; nodeNr < tree.getNodeCount(); nodeNr++) {
@@ -306,11 +319,10 @@ public class GenerationTimeLikelihood extends Distribution {
 
             double branchLength = node.getLength();
 
-            if (branchLength <= 0.0 ||
-                    Double.isNaN(branchLength) ||
-                    Double.isInfinite(branchLength)) {
-                return Double.POSITIVE_INFINITY;
-            }
+			// Same minBranchLength floor as the precision matrix Q (see above).
+			if (!(branchLength > 0.0) || Double.isInfinite(branchLength)) {
+				branchLength = precisionBuilderInput.get().getMinBranchLength();
+			}
 
             double childValue = generationTimes.getValue(node.getNr());
             double parentValue = generationTimes.getValue(parent.getNr());
@@ -362,9 +374,12 @@ public class GenerationTimeLikelihood extends Distribution {
             }
 
             double branchLength = node.getLength();
+			if (!(branchLength > 0.0) || Double.isInfinite(branchLength)) {
+				branchLength = precisionBuilderInput.get().getMinBranchLength();
+			}
 
-            logBranchLengthSum += Math.log(branchLength);
-            treeLengthSum += branchLength;
+			logBranchLengthSum += Math.log(branchLength);
+			treeLengthSum += branchLength;
             edgeCount++;
         }
 

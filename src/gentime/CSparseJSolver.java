@@ -67,7 +67,7 @@ public class CSparseJSolver {
         numericFactorised = false;
     }
 
-    // Update CSC numeric values and run CSparseJ numeric Cholesky factorisation.
+    // Update CSC numeric values and run CSparseJ numeric Cholesky factorisation
     
     public void factorize(double[] values) {
 
@@ -105,7 +105,7 @@ public class CSparseJSolver {
         numericFactorised = true;
     }
     
-    // Solve A x = rhs using the current CSparseJ Cholesky factorisation.
+    // Solve A x = rhs using the current CSparseJ Cholesky factorisation
 
     public double[] solve(double[] rhs) {
 

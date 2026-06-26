@@ -12,6 +12,16 @@ public class GenerationTimePrecisionBuilder extends CalculationNode {
             "Tree from which sparse Brownian precision structures are built.",
             Input.Validate.REQUIRED
     );
+
+    public Input<Double> minBranchLengthInput = new Input<>(
+            "minBranchLength",
+            "Lower floor applied to each branch length before forming the Brownian " +
+            "precision. A zero or degenerate branch (tied node heights in a starting " +
+            "tree, identical sequences, or an unresolved polytomy) then yields a large " +
+            "but finite precision instead of an error. Keep it tiny so it only catches " +
+            "true degeneracies and does not shrink genuine short-branch signal.",
+            1.0e-8
+    );
     
     protected int nodeCount;
     protected int edgeCount;
@@ -19,6 +29,7 @@ public class GenerationTimePrecisionBuilder extends CalculationNode {
     protected int[] parent;
     protected int[] child;
     protected double[] branchLength;
+    protected double minBranchLength;
 
     protected int nTriplets;
     protected int[] qRow;
@@ -81,9 +92,20 @@ public class GenerationTimePrecisionBuilder extends CalculationNode {
     
     @Override
     public void initAndValidate() {
+        minBranchLength = minBranchLengthInput.get();
+        if (!(minBranchLength > 0.0) || Double.isInfinite(minBranchLength)) {
+            throw new IllegalArgumentException(
+                    "minBranchLength must be a positive, finite number."
+            );
+        }
         buildFromTree();
         topologySignature = computeTopologySignature(treeInput.get());
         branchLengthSignature = computeBranchLengthSignature(treeInput.get());
+    }
+
+    /** Lower floor applied to branch lengths before forming the Brownian precision. */
+    public double getMinBranchLength() {
+        return minBranchLength;
     }
     
     private void addTriplet(int index, int row, int col, double value) {
@@ -117,7 +139,7 @@ public class GenerationTimePrecisionBuilder extends CalculationNode {
 
             parent[edgeIndex] = parentNode.getNr();
             child[edgeIndex] = node.getNr();
-            branchLength[edgeIndex] = node.getLength();
+            branchLength[edgeIndex] = Math.max(node.getLength(), minBranchLength);
 
             edgeIndex++;
         }
@@ -269,7 +291,7 @@ public class GenerationTimePrecisionBuilder extends CalculationNode {
                 );
             }
 
-            branchLength[edgeIndex] = node.getLength();
+            branchLength[edgeIndex] = Math.max(node.getLength(), minBranchLength);
             edgeIndex++;
         }
 
@@ -338,11 +360,11 @@ public class GenerationTimePrecisionBuilder extends CalculationNode {
             int c = child[e];
             double length = branchLength[e];
 
-            if (length <= 0.0) {
-                throw new IllegalArgumentException(
-                        "Branch length must be positive for Brownian precision. " +
-                        "Edge " + e + " has length " + length
-                );
+            if (!(length > 0.0)) {
+                // Branch lengths are already floored at assignment; this is a
+                // defensive backstop that also catches non-finite values, so a
+                // degenerate branch never aborts the run.
+                length = minBranchLength;
             }
 
             double w = 1.0 / length;
