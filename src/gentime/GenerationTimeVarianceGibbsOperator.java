@@ -45,6 +45,12 @@ public class GenerationTimeVarianceGibbsOperator extends Operator {
             "Inverse-gamma prior scale parameter.",
             0.001
     );
+    
+    public Input<RealParameter> priorScaleInput = new Input<>(
+            "priorScale",
+            "Optional IG scale as a parameter (priorBeta = 1/priorScale); enables the half-Cauchy scale mixture. Overrides priorBeta when set.",
+            (RealParameter) null
+    );
 
     @Override
     public void initAndValidate() {
@@ -90,6 +96,7 @@ public class GenerationTimeVarianceGibbsOperator extends Operator {
 	
 	    double priorAlpha = priorAlphaInput.get();
 	    double priorBeta = priorBetaInput.get();
+	    if (priorScaleInput.get() != null) priorBeta = 1.0 / priorScaleInput.get().getValue();
 	
 	    double posteriorAlpha = priorAlpha + 0.5 * brownianRank;
 	    double posteriorBeta = priorBeta + 0.5 * quadraticFormTriplet;

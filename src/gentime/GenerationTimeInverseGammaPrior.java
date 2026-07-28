@@ -26,6 +26,11 @@ public class GenerationTimeInverseGammaPrior extends Distribution {
             "Inverse-gamma scale parameter.",
             Input.Validate.REQUIRED
     );
+    
+    public Input<RealParameter> scaleInput = new Input<>(
+            "scale", "Optional: beta = 1/scale (a parameter), for the half-Cauchy scale mixture. Overrides beta.",
+            (RealParameter) null
+    );
 
     @Override
     public void initAndValidate() {
@@ -49,6 +54,7 @@ public class GenerationTimeInverseGammaPrior extends Distribution {
         double x = parameterInput.get().getValue();
         double alpha = alphaInput.get();
         double beta = betaInput.get();
+        if (scaleInput.get() != null) beta = 1.0 / scaleInput.get().getValue();
 
         if (x <= 0.0 || Double.isNaN(x) || Double.isInfinite(x)) {
             logP = Double.NEGATIVE_INFINITY;
