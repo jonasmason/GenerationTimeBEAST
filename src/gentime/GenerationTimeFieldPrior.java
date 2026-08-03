@@ -79,9 +79,22 @@ public class GenerationTimeFieldPrior extends Distribution {
             false
     );
 
+    public Input<Double> minBranchLengthInput = new Input<>(
+            "minBranchLength",
+            "Lower floor applied to each branch length before forming the Brownian density. "
+                    + "A zero or degenerate branch (tied node heights in a starting tree, identical "
+                    + "sequences, or an unresolved polytomy) then yields a large but finite term "
+                    + "instead of -Inf. Matches the same floor used by GenerationTimeLikelihood / "
+                    + "GenerationTimePrecisionBuilder so the field prior treats degenerate branches "
+                    + "consistently with the trait model. Keep it tiny so it only catches true "
+                    + "degeneracies and does not shrink genuine short-branch signal.",
+            1.0e-8
+    );
+
     private static final double LOG_TWO_PI = Math.log(2.0 * Math.PI);
 
     protected boolean unitHeight;
+    protected double minBranchLength;
 
     @Override
     public void initAndValidate() {
@@ -103,6 +116,13 @@ public class GenerationTimeFieldPrior extends Distribution {
         }
 
         unitHeight = unitHeightInput.get();
+
+        minBranchLength = minBranchLengthInput.get();
+        if (!(minBranchLength > 0.0) || Double.isInfinite(minBranchLength)) {
+            throw new IllegalArgumentException(
+                    "minBranchLength must be a positive, finite number."
+            );
+        }
     }
 
     @Override
@@ -168,10 +188,10 @@ public class GenerationTimeFieldPrior extends Distribution {
 
             double branchLength = node.getLength();
 
-            if (branchLength <= 0.0 ||
-                    Double.isNaN(branchLength) ||
-                    Double.isInfinite(branchLength)) {
-                return Double.NEGATIVE_INFINITY;
+            // Floor a zero/degenerate/non-finite branch to minBranchLength so it gives a large
+            // but finite term, not -Inf -- the same floor GenerationTimeLikelihood applies.
+            if (!(branchLength > 0.0) || Double.isInfinite(branchLength)) {
+                branchLength = minBranchLength;
             }
 
             logBranchLengthSum += Math.log(branchLength);
@@ -207,10 +227,10 @@ public class GenerationTimeFieldPrior extends Distribution {
 
             double branchLength = node.getLength();
 
-            if (branchLength <= 0.0 ||
-                    Double.isNaN(branchLength) ||
-                    Double.isInfinite(branchLength)) {
-                return Double.POSITIVE_INFINITY;
+            // Same minBranchLength floor as above (and as GenerationTimeLikelihood): a degenerate
+            // branch yields a large but finite quadratic-form term rather than +Inf -> -Inf.
+            if (!(branchLength > 0.0) || Double.isInfinite(branchLength)) {
+                branchLength = minBranchLength;
             }
 
             double childValue = generationTimes.getValue(node.getNr());
