@@ -68,19 +68,10 @@ public class GenerationTimeRegressionClockModel extends BranchRateModel.Base {
                     + "mean each evaluation, so the slope pivots around the data centroid "
                     + "rather than around zero. This decorrelates clockSlope from the "
                     + "base-rate/intercept level and leaves the slope depending only on the "
-                    + "relative structure of the latent field. Default false (legacy behaviour).",
-            false
-    );
-
-    public Input<Boolean> staticCenterInput = new Input<>(
-            "staticCenter",
-            "Only used when meanCenterPredictor=true. If true, the across-branch predictor mean is "
-                    + "computed ONCE at initialisation and then held fixed (static centring at the "
-                    + "initial data centroid) instead of being recomputed every evaluation (dynamic "
-                    + "centring). Static centring subtracts a fixed constant, so it is a pure "
-                    + "reparameterisation that stays valid even when the clock level/intercept is "
-                    + "identified; dynamic centring is only safe when the level is non-identified. "
-                    + "Default false (dynamic, legacy behaviour).",
+                    + "relative structure of the latent field. If false (default), no centring: the "
+                    + "generation-time mean is expected to live in the field decomposition (beta), so "
+                    + "the predictor is already ~mean-zero. Centring here (all-branch mean, recomputed "
+                    + "each evaluation) is only safe when the clock level/intercept is non-identified.",
             false
     );
 
@@ -94,9 +85,6 @@ public class GenerationTimeRegressionClockModel extends BranchRateModel.Base {
 
     private String branchGenerationTimeMode;
     private boolean meanCenterPredictor;
-    private boolean staticCenter;
-    private double frozenPredictorMean;
-    private boolean frozenPredictorMeanSet = false;
 
     private double[] rates;
     private double[] storedRates;
@@ -148,7 +136,6 @@ public class GenerationTimeRegressionClockModel extends BranchRateModel.Base {
 
         branchGenerationTimeMode = branchGenerationTimeModeInput.get();
         meanCenterPredictor = meanCenterPredictorInput.get();
-        staticCenter = staticCenterInput.get();
 
         if (!branchGenerationTimeMode.equals("midpoint") &&
                 !branchGenerationTimeMode.equals("child") &&
@@ -183,30 +170,21 @@ public class GenerationTimeRegressionClockModel extends BranchRateModel.Base {
         double intercept = clockIntercept.getValue();
         double slope = clockSlope.getValue();
 
-        // Across-branch mean of the predictor, for optional mean-centring. Dynamic (default):
-        // recomputed each evaluation so it tracks the current latent field. Static: computed once
-        // at the first evaluation and then frozen, so it subtracts a fixed constant.
+        // Across-branch mean of the predictor, for optional mean-centring. Recomputed each
+        // evaluation so it tracks the current latent field (dynamic centring).
         double predictorMean = 0.0;
         if (meanCenterPredictor) {
-            if (staticCenter && frozenPredictorMeanSet) {
-                predictorMean = frozenPredictorMean;
-            } else {
-                double sum = 0.0;
-                int count = 0;
-                for (int nodeNr = 0; nodeNr < tree.getNodeCount(); nodeNr++) {
-                    Node node = tree.getNode(nodeNr);
-                    if (node.isRoot()) {
-                        continue;
-                    }
-                    sum += getBranchGenerationTime(node);
-                    count++;
+            double sum = 0.0;
+            int count = 0;
+            for (int nodeNr = 0; nodeNr < tree.getNodeCount(); nodeNr++) {
+                Node node = tree.getNode(nodeNr);
+                if (node.isRoot()) {
+                    continue;
                 }
-                predictorMean = (count > 0) ? sum / count : 0.0;
-                if (staticCenter) {
-                    frozenPredictorMean = predictorMean;
-                    frozenPredictorMeanSet = true;
-                }
+                sum += getBranchGenerationTime(node);
+                count++;
             }
+            predictorMean = (count > 0) ? sum / count : 0.0;
         }
 
         for (int nodeNr = 0; nodeNr < tree.getNodeCount(); nodeNr++) {
