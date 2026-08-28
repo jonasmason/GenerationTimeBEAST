@@ -134,4 +134,29 @@ public class GenerationTimeClockLinkedRandomWalkOperator extends Operator {
             }
         }
     }
+
+    // ---- adaptive tuning of the window (targets ~0.234 acceptance) --------------
+    // Without these the window is fixed (shown as Tuning "-"), so under carry-beta -- where beta enters
+    // the predictor and its full conditional is tight -- the fixed step over/undershoots and acceptance
+    // drifts (seen collapsing to ~0.08). Auto-tuning keeps beta/field moving.
+
+    @Override
+    public double getCoercableParameterValue() {
+        return windowSize;
+    }
+
+    @Override
+    public void setCoercableParameterValue(final double value) {
+        windowSize = value;
+    }
+
+    @Override
+    public void optimize(final double logAlpha) {
+        windowSize = Math.exp(Math.log(windowSize) + calcDelta(logAlpha));
+    }
+
+    @Override
+    public String getPerformanceSuggestion() {
+        return "";
+    }
 }

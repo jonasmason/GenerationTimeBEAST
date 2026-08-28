@@ -68,6 +68,27 @@ public class GenerationTimeLevelScaleRidgeOperator extends Operator {
             Input.Validate.REQUIRED
     );
 
+    public Input<RealParameter> clockInterceptInput = new Input<>(
+            "clockIntercept",
+            "Clock intercept a. REQUIRED when compensateVia is 'clockIntercept'; ignored otherwise.",
+            (RealParameter) null
+    );
+
+    public Input<String> compensateViaInput = new Input<>(
+            "compensateVia",
+            "How the level move holds the clock genetic distances fixed:\n"
+                    + "  'treeHeight'    (default) - rescale internal node heights by exp(s*delta). Valid only "
+                    + "when the tree scale is free to absorb the level, i.e. under the alpha=0 "
+                    + "(fix_base_rate) timescale with the clock intercept fixed. Historical behaviour.\n"
+                    + "  'clockIntercept' - set a += s*delta and leave the tree alone. Use whenever node ages "
+                    + "are pinned and the clock intercept is estimated. Hastings ratio is 0.\n"
+                    + "  'none'          - no compensation. Correct ONLY when beta is carried into the clock "
+                    + "predictor (includeBetaInRate='true'), because the predictor 0.5(u_p+u_c)+beta is then "
+                    + "already invariant under this move. Reproduces GenerationTimeLevelRidgeOperator exactly "
+                    + "and is regime-independent.",
+            "treeHeight"
+    );
+
     public Input<Double> windowSizeInput = new Input<>(
             "windowSize",
             "Uniform random-walk half-width for the level shift delta.",
@@ -78,6 +99,8 @@ public class GenerationTimeLevelScaleRidgeOperator extends Operator {
     private RealParameter generationTimes;
     private RealParameter beta;
     private RealParameter clockSlope;
+    private RealParameter clockIntercept;
+    private String compensateVia;
     private double windowSize;
 
     @Override
@@ -87,6 +110,8 @@ public class GenerationTimeLevelScaleRidgeOperator extends Operator {
         generationTimes = generationTimesInput.get();
         beta = betaInput.get();
         clockSlope = clockSlopeInput.get();
+        clockIntercept = clockInterceptInput.get();
+        compensateVia = compensateViaInput.get();
         windowSize = windowSizeInput.get();
 
         if (generationTimes.getDimension() != tree.getNodeCount()) {
@@ -101,6 +126,25 @@ public class GenerationTimeLevelScaleRidgeOperator extends Operator {
 
         if (clockSlope.getDimension() != 1) {
             throw new IllegalArgumentException("clockSlope must be a scalar RealParameter.");
+        }
+
+        if (!compensateVia.equals("treeHeight")
+                && !compensateVia.equals("clockIntercept")
+                && !compensateVia.equals("none")) {
+            throw new IllegalArgumentException(
+                    "compensateVia must be 'treeHeight', 'clockIntercept' or 'none'."
+            );
+        }
+
+        if (compensateVia.equals("clockIntercept")) {
+            if (clockIntercept == null) {
+                throw new IllegalArgumentException(
+                        "compensateVia='clockIntercept' requires the clockIntercept input."
+                );
+            }
+            if (clockIntercept.getDimension() != 1) {
+                throw new IllegalArgumentException("clockIntercept must be a scalar RealParameter.");
+            }
         }
 
         if (!(windowSize > 0.0) || Double.isInfinite(windowSize)) {
@@ -126,6 +170,22 @@ public class GenerationTimeLevelScaleRidgeOperator extends Operator {
             generationTimes.setValue(nodeNr, generationTimes.getValue(nodeNr) - delta);
         }
 
+        // Off-root the predictor shifted by -delta, so log mu_b moved by -s*delta. Restore the level
+        // through the clock intercept instead of the tree: a += s*delta. Genetic distances are then
+        // invariant on every branch not touching the root, exactly as in the tree-rescaling variant, and
+        // the (typically 2) root-adjacent branches keep the same +s*delta/2 residue. Pure translation,
+        // so there is no Jacobian.
+        if (compensateVia.equals("clockIntercept")) {
+            clockIntercept.setValue(0, clockIntercept.getValue() + s * delta);
+            return 0.0;
+        }
+
+        // No compensation: correct only when beta is carried into the predictor, where the move is
+        // already rate-invariant off-root. Equivalent to GenerationTimeLevelRidgeOperator.
+        if (compensateVia.equals("none")) {
+            return 0.0;
+        }
+
         // rescale the tree so clock distances rate*time stay invariant: every branch time *= exp(s*delta)
         final double f = Math.exp(s * delta);
         if (f <= 0.0 || Double.isNaN(f) || Double.isInfinite(f)) {
@@ -139,6 +199,18 @@ public class GenerationTimeLevelScaleRidgeOperator extends Operator {
             }
             node.setHeight(node.getHeight() * f);
             nInternal++;
+        }
+
+        // Only internal heights were scaled: safe when every tip sits at height 0, not when tips are dated.
+        // Reject rather than leave a negative branch length in the state.
+        for (int nodeNr = 0; nodeNr < nodeCount; nodeNr++) {
+            final Node guard = tree.getNode(nodeNr);
+            if (guard.isRoot()) {
+                continue;
+            }
+            if (guard.getParent().getHeight() < guard.getHeight()) {
+                return Double.NEGATIVE_INFINITY;
+            }
         }
 
         // log Hastings ratio = log-Jacobian of scaling nInternal heights by f; translations contribute 0.
